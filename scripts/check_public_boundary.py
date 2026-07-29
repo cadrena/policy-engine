@@ -198,7 +198,7 @@ def _check_replacements(module: dict[str, object]) -> list[str]:
     if not isinstance(replacements, list):
         raise ValueError("go mod edit -json returned an invalid Replace value")
 
-    for replacement in replacements:
+    for index, replacement in enumerate(replacements, start=1):
         if not isinstance(replacement, dict):
             raise ValueError("go mod edit -json returned an invalid replacement")
         old = replacement.get("Old") or {}
@@ -206,10 +206,8 @@ def _check_replacements(module: dict[str, object]) -> list[str]:
         if not isinstance(old, dict) or not isinstance(new, dict):
             raise ValueError("go mod edit -json returned an invalid replacement module")
         if not new.get("Version"):
-            old_path = old.get("Path", "<unknown>")
-            new_path = new.get("Path", "<unknown>")
             violations.append(
-                f"go.mod: local replacement is not allowed: {old_path} => {new_path}"
+                f"go.mod: local replacement #{index} is not allowed"
             )
     return violations
 

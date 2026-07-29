@@ -251,18 +251,29 @@ class PublicBoundaryIntegrationTests(unittest.TestCase):
 
 class PublicBoundaryUnitTests(unittest.TestCase):
     def test_quoted_and_absolute_local_replacements_are_rejected(self) -> None:
+        first_old = "example.com/sensitive-old"
+        first_new = "../registry." + "internal/secret-marker"
+        second_old = "example.com/another-sensitive-old"
+        second_new = "/tmp/another-secret-marker"
         module = {
             "Replace": [
-                {"Old": {"Path": "example.com/a"}, "New": {"Path": "../quoted dir"}},
-                {"Old": {"Path": "example.com/b"}, "New": {"Path": "/tmp/absolute"}},
+                {"Old": {"Path": first_old}, "New": {"Path": first_new}},
+                {"Old": {"Path": second_old}, "New": {"Path": second_new}},
             ]
         }
 
         violations = checker._check_replacements(module)
 
-        self.assertEqual(len(violations), 2)
-        self.assertIn("../quoted dir", violations[0])
-        self.assertIn("/tmp/absolute", violations[1])
+        self.assertEqual(
+            violations,
+            [
+                "go.mod: local replacement #1 is not allowed",
+                "go.mod: local replacement #2 is not allowed",
+            ],
+        )
+        rendered = "\n".join(violations)
+        for sensitive_value in (first_old, first_new, second_old, second_new):
+            self.assertNotIn(sensitive_value, rendered)
 
     def test_versioned_module_replacement_is_allowed(self) -> None:
         module = {
