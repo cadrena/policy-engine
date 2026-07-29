@@ -20,13 +20,23 @@ import (
 	"github.com/conductera/policy-engine/store/conformance"
 )
 
+func TestNewReturnsInitializedStore(t *testing.T) {
+	adapter, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter == nil {
+		t.Fatal("New returned a nil store")
+	}
+}
+
 func TestStoreFormattingIsStaticRedactedAndRaceSafe(t *testing.T) {
 	const (
 		namespaceCanary = "namespace-canary-private"
 		artifactCanary  = "artifact_canary_private"
 		cursorKeyCanary = "231 231 231 231 231 231"
 	)
-	adapter := New()
+	adapter := MustNew()
 	for index := range adapter.cursorKey {
 		adapter.cursorKey[index] = 231
 	}
@@ -380,7 +390,7 @@ func TestClockMayReenterStoreReadWithoutDeadlock(t *testing.T) {
 }
 
 func TestActivateClockMayReenterStoreReadWithoutDeadlock(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	revision := revisionWrite(t, "clock-reentrant", "entity document {}")
 	if _, err := adapter.PutRevision(context.Background(), revision); err != nil {
 		t.Fatal(err)
@@ -411,7 +421,7 @@ func TestActivateClockMayReenterStoreReadWithoutDeadlock(t *testing.T) {
 }
 
 func TestWriteDataClockMayReenterStoreReadWithoutDeadlock(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	revision := revisionWrite(t, "clock-reentrant", "entity document {}")
 	if _, err := adapter.PutRevision(context.Background(), revision); err != nil {
 		t.Fatal(err)
@@ -434,7 +444,7 @@ func TestWriteDataClockMayReenterStoreReadWithoutDeadlock(t *testing.T) {
 }
 
 func TestListEventsClockMayReenterStoreReadWithoutDeadlock(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	if _, err := adapter.PutRevision(context.Background(), revisionWrite(t, "clock-reentrant", "entity document {}")); err != nil {
 		t.Fatal(err)
 	}
@@ -841,7 +851,7 @@ func TestClockReentrantSameNamespaceMutationsReturnPromptlyWithoutWedge(t *testi
 	})
 
 	t.Run("Activate", func(t *testing.T) {
-		adapter := New()
+		adapter := MustNew()
 		revision := revisionWrite(t, "mutation-reentry-activate", "entity document {}")
 		if _, err := adapter.PutRevision(context.Background(), revision); err != nil {
 			t.Fatal(err)
@@ -878,7 +888,7 @@ func TestClockReentrantSameNamespaceMutationsReturnPromptlyWithoutWedge(t *testi
 	})
 
 	t.Run("WriteData", func(t *testing.T) {
-		adapter := New()
+		adapter := MustNew()
 		revision := revisionWrite(t, "mutation-reentry-data", "entity document {}")
 		if _, err := adapter.PutRevision(context.Background(), revision); err != nil {
 			t.Fatal(err)
@@ -916,7 +926,7 @@ func TestClockReentrantSameNamespaceMutationsReturnPromptlyWithoutWedge(t *testi
 }
 
 func TestRevisionPaginationRemainsOrderedWhenEarlierRevisionIsPublished(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	middle := revisionWriteAt(t, "pagination-a", "entity middle {}", time.Unix(20, 0).UTC())
 	later := revisionWriteAt(t, "pagination-a", "entity later {}", time.Unix(30, 0).UTC())
@@ -961,7 +971,7 @@ func TestRevisionPaginationRemainsOrderedWhenEarlierRevisionIsPublished(t *testi
 }
 
 func TestRevisionPaginationUsesPersistentBoundedOrderedIndex(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	for index := range 64 {
 		publishedAt := time.Unix(int64(100+index), 0).UTC()
@@ -990,7 +1000,7 @@ func TestRevisionPaginationUsesPersistentBoundedOrderedIndex(t *testing.T) {
 }
 
 func TestPutRevisionCommitsOrderedIndexMapAndEventAtomically(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	first := revisionWriteAt(t, "revision-atomic", "entity first {}", time.Unix(10, 0).UTC())
 	if _, err := adapter.PutRevision(ctx, first); err != nil {
@@ -1050,7 +1060,7 @@ func TestCursorKeyInitializationFailureDoesNotConstructBrokenStore(t *testing.T)
 }
 
 func TestRevisionCursorRoundTripsTimestampsOutsideUnixNanoRange(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	writes := []storecontract.RevisionWrite{
 		revisionWriteAt(t, "cursor-time", "entity futureone {}", time.Date(2400, time.January, 2, 3, 4, 5, 6, time.UTC)),
@@ -1086,7 +1096,7 @@ func TestRevisionCursorRoundTripsTimestampsOutsideUnixNanoRange(t *testing.T) {
 }
 
 func TestCursorsAreSelfContainedAuthenticatedScopedAndRegistryFree(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	for _, namespace := range []string{"cursor-secret-a", "cursor-secret-b"} {
 		for index, source := range []string{"entity first {}", "entity second {}"} {
@@ -1139,7 +1149,7 @@ func TestCursorsAreSelfContainedAuthenticatedScopedAndRegistryFree(t *testing.T)
 }
 
 func TestCursorRejectsMalformedCrossDomainCrossStoreAndCrossSlotTokens(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	namespace := "cursor-scope"
 	writes := []storecontract.RevisionWrite{
@@ -1182,7 +1192,7 @@ func TestCursorRejectsMalformedCrossDomainCrossStoreAndCrossSlotTokens(t *testin
 			}
 		})
 	}
-	foreignStore := New()
+	foreignStore := MustNew()
 	crossStore, _ := policyengine.NewListRevisionsRequest(namespace, revisionCursor, 1)
 	if _, err := foreignStore.ListRevisions(ctx, crossStore); errorCategory(err) != policyengine.ErrorInvalidArgument {
 		t.Fatalf("cross-store cursor error = %v", err)
@@ -1341,7 +1351,7 @@ func revisionWriteAt(t testing.TB, namespace, source string, publishedAt time.Ti
 }
 
 func TestRejectedWriteDoesNotRetainAbsentNamespaceState(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	revision := revisionWrite(t, "present-write", "entity document {}")
 	if _, err := adapter.PutRevision(context.Background(), revision); err != nil {
 		t.Fatal(err)
@@ -1358,7 +1368,7 @@ func TestRejectedWriteDoesNotRetainAbsentNamespaceState(t *testing.T) {
 }
 
 func TestOpenSnapshotGenerationZeroDoesNotPersistNamespaceState(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	request, err := storecontract.NewSnapshotRequest("empty-snapshot", 0, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -1376,7 +1386,7 @@ func TestOpenSnapshotGenerationZeroDoesNotPersistNamespaceState(t *testing.T) {
 }
 
 func TestCanceledMinimumGenerationWaitDoesNotRetainAbsentNamespaces(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	for index := range 16 {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 		request, err := storecontract.NewSnapshotRequest(
@@ -1501,7 +1511,7 @@ func (c *cancelAtErrContext) Err() error {
 }
 
 func TestQueryTuplesChecksContextPeriodicallyWithinLargeValidBucket(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	revision := revisionWrite(t, "query-context", "entity document {}")
 	if _, err := adapter.PutRevision(ctx, revision); err != nil {
@@ -1547,7 +1557,7 @@ func TestQueryTuplesChecksContextPeriodicallyWithinLargeValidBucket(t *testing.T
 
 func TestQueryTuplesBoundsWorkAcrossExpiredExactBucket(t *testing.T) {
 	const namespace = "query-expired-work-bound"
-	adapter := New()
+	adapter := MustNew()
 	resource := dsl.EntityRef{Type: "document", ID: "target"}
 	readAt := time.Unix(100, 0).UTC()
 	expiresAt := readAt.Add(-time.Nanosecond)
@@ -1666,7 +1676,7 @@ func TestSnapshotFinalContextMappingMayReenterClose(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			adapter := New()
+			adapter := MustNew()
 			request, _ := storecontract.NewSnapshotRequest("snapshot-final-reentry-"+test.name, 0, time.Unix(20, 0).UTC())
 			view, err := adapter.OpenSnapshot(context.Background(), request)
 			if err != nil {
@@ -1699,7 +1709,7 @@ func TestSnapshotFinalContextMappingMayReenterClose(t *testing.T) {
 }
 
 func TestSnapshotLateReadsFailPromptlyAndFinalReaderClearsReferencesOnce(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	request, _ := storecontract.NewSnapshotRequest("snapshot-lifecycle", 0, time.Unix(20, 0).UTC())
 	view, err := adapter.OpenSnapshot(ctx, request)
@@ -1797,7 +1807,7 @@ func TestSnapshotLateReadsFailPromptlyAndFinalReaderClearsReferencesOnce(t *test
 }
 
 func TestAdmittedSnapshotReadObeysItsOwnContextDuringClose(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	request, _ := storecontract.NewSnapshotRequest("snapshot-context", 0, time.Unix(20, 0).UTC())
 	view, err := adapter.OpenSnapshot(context.Background(), request)
 	if err != nil {
@@ -1837,7 +1847,7 @@ func TestAdmittedSnapshotReadObeysItsOwnContextDuringClose(t *testing.T) {
 }
 
 func TestOpenSnapshotPinsExactImmutableVersionInConstantWork(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	revision := revisionWrite(t, "indexed-a", "entity document {}")
 	if _, err := adapter.PutRevision(ctx, revision); err != nil {
@@ -1936,7 +1946,7 @@ func newReentrantOperationFixture(t testing.TB) reentrantOperationFixture {
 	t.Helper()
 	const namespace = "context-reentry"
 	ctx := context.Background()
-	adapter := New()
+	adapter := MustNew()
 	revision := revisionWrite(t, namespace, "entity document {}")
 	if _, err := adapter.PutRevision(ctx, revision); err != nil {
 		t.Fatal(err)
@@ -2103,7 +2113,7 @@ func requireDirectInternalWithoutPanic(t testing.TB, call func() error) {
 }
 
 func TestHostileContextPanicsAreContainedAtEveryOperationBoundary(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := context.Background()
 	revision := revisionWrite(t, "hostile-a", "entity document {}")
 	if _, err := adapter.PutRevision(ctx, revision); err != nil {
@@ -2152,7 +2162,7 @@ func TestHostileContextPanicsAreContainedAtEveryOperationBoundary(t *testing.T) 
 }
 
 func TestHostileContextDonePanicIsContainedAtEveryWait(t *testing.T) {
-	adapter := New()
+	adapter := MustNew()
 	ctx := panicDoneContext{Context: context.Background()}
 	wait, _ := storecontract.NewSnapshotRequest("hostile-wait", 1, time.Unix(20, 0).UTC())
 	requireDirectInternalWithoutPanic(t, func() error { _, err := adapter.OpenSnapshot(ctx, wait); return err })
@@ -2207,7 +2217,7 @@ func newMemoryAttributeWrite(t testing.TB, namespace, revisionID string, expecte
 
 func TestStoreConformance(t *testing.T) {
 	conformance.Run(t, func(testing.TB) conformance.Fixture {
-		adapter := New()
+		adapter := MustNew()
 		return conformance.Fixture{
 			Store:                      adapter,
 			ActivationHistoryRetention: activationHistoryRetention,

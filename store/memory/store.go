@@ -58,11 +58,15 @@ type Store struct {
 	nextDataPause *pauseState
 }
 
-// New constructs an isolated store using the system clock. It panics with a
-// static message if the operating system cannot provide cursor-key entropy;
-// returning a store that can never issue authenticated cursors would be unsafe.
-func New() *Store {
-	result, err := newStoreWithCursorKeySource(systemClock{}, initializeCursorKey)
+// New constructs an isolated store using the system clock.
+func New() (*Store, error) {
+	return newStoreWithCursorKeySource(systemClock{}, initializeCursorKey)
+}
+
+// MustNew constructs an isolated store using the system clock and panics if
+// construction fails. Use New when failure must remain recoverable.
+func MustNew() *Store {
+	result, err := New()
 	if err != nil {
 		panic("memory: cursor key initialization failed")
 	}
