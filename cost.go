@@ -54,6 +54,18 @@ func addEntityRefCost(budget *budgetCounter, entity dsl.EntityRef) error {
 	return addTextCost(budget, entity.ID)
 }
 
+func addAttributePathCost(budget *budgetCounter, path []string) error {
+	if err := budget.add(collectionMetadataBytes); err != nil {
+		return err
+	}
+	for _, segment := range path {
+		if err := addTextCost(budget, segment); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func addSubjectRefCost(budget *budgetCounter, subject dsl.SubjectRef) error {
 	if err := addTextCost(budget, subject.Type); err != nil {
 		return err
@@ -91,7 +103,7 @@ func addAttributeCost(budget *budgetCounter, attribute Attribute) error {
 	if err := addEntityRefCost(budget, attribute.entity); err != nil {
 		return err
 	}
-	if err := addTextCost(budget, attribute.name); err != nil {
+	if err := addAttributePathCost(budget, attribute.path); err != nil {
 		return err
 	}
 	return addValueCost(budget, attribute.value)
@@ -238,7 +250,7 @@ func addWriteDataRequestCost(budget *budgetCounter, input WriteDataRequestInput)
 		if err := addEntityRefCost(budget, attribute.entity); err != nil {
 			return err
 		}
-		if err := addTextCost(budget, attribute.name); err != nil {
+		if err := addAttributePathCost(budget, attribute.path); err != nil {
 			return err
 		}
 	}

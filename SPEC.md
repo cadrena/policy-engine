@@ -201,6 +201,15 @@ order, not transaction start time, timestamp, or random identifier. Each write
 MUST provide an explicit loaded `validation_revision_id` and MUST be validated
 against that revision before mutation.
 
+An attribute is keyed by an entity and a non-empty sequence of DSL identifier
+path segments and stores one typed scalar leaf. The path is structured; it MUST
+NOT be flattened into a delimiter-joined string. The same entity cannot contain
+both a path and one of its strict prefixes. Such prefix conflicts in a request
+MUST be rejected before mutation or evaluation.
+If a valid persistent write conflicts with a path already present at its exact
+expected generation, the write MUST return `CONFLICT` and leave state,
+generation, idempotency, and events unchanged.
+
 The empty dataset starts at generation `0`; the first successful mutation
 commits generation `1`. `GetDataGeneration` returns only the current generation
 metadata, requires `data.write`, and MUST NOT disclose tuples or attributes.
@@ -210,6 +219,16 @@ The exact successful generation used by reads and decisions MUST be returned.
 snapshot or cache identity. If the minimum cannot be satisfied before the
 deadline, evaluation MUST return a typed error. V1 MUST NOT claim exact
 historical generation reads.
+
+The per-write mutation limit is not a maximum dataset size. A pinned snapshot
+MUST support bounded exact resource-and-relation tuple queries and typed
+attribute point reads without materializing the whole namespace. A tuple query
+returns every matching live subject or `RESOURCE_EXHAUSTED`; it MUST NOT return
+a truncated authoritative result. Closing a snapshot releases its resources,
+and subsequent reads through it fail closed. A read admitted before `Close`
+MUST retain its pinned resource and complete under its own context; `Close`
+waits for every such read. Reads admitted after closing begins fail with
+`FAILED_PRECONDITION`, and concurrent `Close` calls are idempotent.
 
 Tuple expiry MUST be enforced at read time using a clock captured once for the
 request. Cleanup MUST NOT be required for expired tuples to stop granting

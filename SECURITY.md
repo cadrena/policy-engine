@@ -71,6 +71,7 @@ are not part of the public runtime.
 | Missing slot or revision | Typed error, never `DENY` or `ALLOW` |
 | Stale activation revision or generation CAS | `CONFLICT`; slot unchanged |
 | Stale data-generation CAS | `CONFLICT`; dataset unchanged |
+| Persistent attribute path-prefix conflict | `CONFLICT`; dataset unchanged |
 | Idempotency key reused with changed payload | `CONFLICT`; no mutation |
 | Minimum generation unavailable by deadline | Typed timeout or precondition error |
 | Untrusted contextual data | `PERMISSION_DENIED` or `INVALID_ARGUMENT` |
@@ -145,6 +146,11 @@ deletes, the generation increment, idempotency record, and state event commit
 atomically or not at all. The exact committed data generation used by a read or
 decision is returned.
 
+Persistent and contextual attributes use immutable structured DSL field paths
+to typed scalar leaves. Delimiter-joined path encodings are forbidden. A scalar
+path and its strict descendant cannot coexist for the same entity; prefix
+conflicts fail before state or evaluation changes.
+
 The initial empty dataset is generation `0`, and the first successful mutation
 commits generation `1`. The metadata-only `GetDataGeneration` operation requires
 `data.write` and does not disclose tuples or attributes.
@@ -156,6 +162,13 @@ no evaluation occurs.
 
 Tuple expiry is checked at read time against a clock captured once per request.
 Cleanup timing cannot cause an expired tuple to grant access.
+
+The mutation-batch bound does not cap accumulated dataset size. Pinned storage
+reads are bounded per tuple query or attribute point lookup, remain fixed at one
+exact generation across concurrent commits, and return all matches or a typed
+resource error rather than a partial authorization input. Snapshot close waits
+for reads that already own the pinned resource and prevents new reads; it never
+rolls back a SQLite transaction underneath an admitted query.
 
 ## 8. Approval and delegation security
 
@@ -228,9 +241,17 @@ paths, operators, action and rule names, boolean outcomes, reason codes,
 revision identifiers, generations, and sorted requirement identifiers may be
 reported when their disclosure is authorized and safe.
 
-Security-sensitive exported request, input, collection, and result values must
-redact dynamic content under default `fmt` formatting, Go-syntax formatting,
-and `slog`. Raw values are available only through explicit typed accessors.
+Security-sensitive exported request, input, collection, result, and
+lifetime-bearing handle values must redact dynamic content under default `fmt`
+formatting, Go-syntax formatting, and `slog`. Raw values are available only
+through explicit typed accessors.
+Logging and telemetry code MUST use those supported representations and MUST
+NOT apply an incompatible explicit verb such as `%p` to a non-pointer value;
+Go's invalid-verb diagnostic bypasses `fmt.Formatter` and is not a logging
+redaction boundary. Pointer operands formatted with `%p` expose only addresses.
+Store adapters must return direct sanitized `*EngineError` values. Adapter
+wrappers and custom `As` or `Unwrap` chains are rejected at the conformance
+boundary so alternate formatting cannot expose backend diagnostics.
 
 `Explain` is a separate capability-protected operation. It redacts dynamic
 values and preserves the exact `Check` decision and pinned snapshot. A DSL trace

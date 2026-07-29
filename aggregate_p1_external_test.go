@@ -15,6 +15,11 @@ func maxUniqueIdentifier(index int) string {
 	return prefix + strings.Repeat("x", policyengine.MaxIdentifierBytes-len(prefix))
 }
 
+func maxUniqueDSLIdentifier(index int) string {
+	suffix := fmt.Sprintf("%08d", index)
+	return "x" + strings.Repeat("x", policyengine.MaxIdentifierBytes-len(suffix)-1) + suffix
+}
+
 func requireResourceExhausted(t *testing.T, err error) {
 	t.Helper()
 	if !isCategory(err, policyengine.ErrorResourceExhausted) {
@@ -193,7 +198,7 @@ func TestAggregateConstructorsAcceptReachableLegalMaxima(t *testing.T) {
 	for index := range delegatedAttributes {
 		attribute, attributeErr := policyengine.NewAttribute(
 			dsl.EntityRef{Type: maxUniqueIdentifier(95_000 + index), ID: maxUniqueIdentifier(96_000 + index)},
-			maxUniqueIdentifier(97_000+index),
+			maxUniqueDSLIdentifier(97_000+index),
 			maxValue,
 		)
 		if attributeErr != nil {

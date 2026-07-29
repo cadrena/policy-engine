@@ -120,35 +120,55 @@ func (t RelationshipTuple) valid() bool {
 // Attribute is an immutable typed entity attribute.
 type Attribute struct {
 	entity dsl.EntityRef
-	name   string
+	path   []string
 	value  Value
 }
 
 // NewAttribute validates and constructs an immutable typed entity attribute.
 func NewAttribute(entity dsl.EntityRef, name string, value Value) (Attribute, error) {
+	return NewAttributePath(entity, []string{name}, value)
+}
+
+// NewAttributePath validates and constructs an immutable typed scalar leaf at
+// a non-empty DSL resource field path.
+func NewAttributePath(entity dsl.EntityRef, path []string, value Value) (Attribute, error) {
 	if err := validateEntityRef(entity); err != nil {
 		return Attribute{}, err
 	}
-	if err := validateIdentifier(name); err != nil {
+	if err := validateAttributePath(path); err != nil {
 		return Attribute{}, err
 	}
 	if err := validateValue(value); err != nil {
 		return Attribute{}, err
 	}
-	return Attribute{entity: entity, name: name, value: value}, nil
+	candidate := Attribute{entity: entity, path: path, value: value}
+	budget := budgetCounter{max: MaxAggregateInputBytes}
+	if err := addAttributeCost(&budget, candidate); err != nil {
+		return Attribute{}, err
+	}
+	return Attribute{entity: entity, path: cloneSlice(path), value: value}, nil
 }
 
 // Entity returns the attributed entity.
 func (a Attribute) Entity() dsl.EntityRef { return a.entity }
 
-// Name returns the artifact-declared attribute name.
-func (a Attribute) Name() string { return a.name }
+// Name returns the first artifact-declared path segment. Top-level attributes
+// have exactly this one segment; use Path for nested resource fields.
+func (a Attribute) Name() string {
+	if len(a.path) == 0 {
+		return ""
+	}
+	return a.path[0]
+}
+
+// Path returns a defensive copy of the non-empty resource field path.
+func (a Attribute) Path() []string { return cloneSlice(a.path) }
 
 // Value returns the immutable typed value.
 func (a Attribute) Value() Value { return a.value }
 
 func (a Attribute) valid() bool {
-	return validateEntityRef(a.entity) == nil && validIdentifier(a.name) && validateValue(a.value) == nil
+	return validateEntityRef(a.entity) == nil && validateAttributePath(a.path) == nil && validateValue(a.value) == nil
 }
 
 // ContextualData contains trusted request-scoped additive facts.
@@ -278,12 +298,12 @@ func canonicalRelationshipTuples(values []RelationshipTuple) ([]RelationshipTupl
 }
 
 func compareAttributeKey(left, right Attribute) int {
-	for _, pair := range [][2]string{{left.entity.Type, right.entity.Type}, {left.entity.ID, right.entity.ID}, {left.name, right.name}} {
+	for _, pair := range [][2]string{{left.entity.Type, right.entity.Type}, {left.entity.ID, right.entity.ID}} {
 		if order := cmp.Compare(pair[0], pair[1]); order != 0 {
 			return order
 		}
 	}
-	return 0
+	return compareAttributePath(left.path, right.path)
 }
 
 func compareValue(left, right Value) int {
@@ -317,6 +337,9 @@ func canonicalAttributes(values []Attribute) ([]Attribute, error) {
 			}
 			continue
 		}
+		if write > 0 && attributePathPrefixConflict(result[write-1].entity, result[write-1].path, value.entity, value.path) {
+			return nil, invalidArgument("same entity has conflicting attribute path prefixes")
+		}
 		result[write] = value
 		write++
 	}
@@ -346,28 +369,50 @@ func (k TupleKey) valid() bool {
 // AttributeKey identifies a persistent typed entity attribute for deletion.
 type AttributeKey struct {
 	entity dsl.EntityRef
-	name   string
+	path   []string
 }
 
 // NewAttributeKey validates and constructs an immutable attribute key.
 func NewAttributeKey(entity dsl.EntityRef, name string) (AttributeKey, error) {
+	return NewAttributeKeyPath(entity, []string{name})
+}
+
+// NewAttributeKeyPath validates and constructs an immutable nested attribute
+// key with a non-empty DSL resource field path.
+func NewAttributeKeyPath(entity dsl.EntityRef, path []string) (AttributeKey, error) {
 	if err := validateEntityRef(entity); err != nil {
 		return AttributeKey{}, err
 	}
-	if err := validateIdentifier(name); err != nil {
+	if err := validateAttributePath(path); err != nil {
 		return AttributeKey{}, err
 	}
-	return AttributeKey{entity: entity, name: name}, nil
+	budget := budgetCounter{max: MaxAggregateInputBytes}
+	if err := addEntityRefCost(&budget, entity); err != nil {
+		return AttributeKey{}, err
+	}
+	if err := addAttributePathCost(&budget, path); err != nil {
+		return AttributeKey{}, err
+	}
+	return AttributeKey{entity: entity, path: cloneSlice(path)}, nil
 }
 
 // Entity returns the attributed entity.
 func (k AttributeKey) Entity() dsl.EntityRef { return k.entity }
 
-// Name returns the artifact-declared attribute name.
-func (k AttributeKey) Name() string { return k.name }
+// Name returns the first artifact-declared path segment. Top-level keys have
+// exactly this one segment; use Path for nested resource fields.
+func (k AttributeKey) Name() string {
+	if len(k.path) == 0 {
+		return ""
+	}
+	return k.path[0]
+}
+
+// Path returns a defensive copy of the non-empty resource field path.
+func (k AttributeKey) Path() []string { return cloneSlice(k.path) }
 
 func (k AttributeKey) valid() bool {
-	return validateEntityRef(k.entity) == nil && validIdentifier(k.name)
+	return validateEntityRef(k.entity) == nil && validateAttributePath(k.path) == nil
 }
 
 // GetDataGenerationRequest reads only the current authorization-data head.
@@ -477,7 +522,10 @@ func NewWriteDataRequest(input WriteDataRequestInput) (WriteDataRequest, error) 
 	if err != nil {
 		return WriteDataRequest{}, err
 	}
-	attributeDeletes := canonicalAttributeKeys(input.AttributeDeletes)
+	attributeDeletes, err := canonicalAttributeKeys(input.AttributeDeletes)
+	if err != nil {
+		return WriteDataRequest{}, err
+	}
 	if tupleWriteDeleteConflict(tupleWrites, tupleDeletes) || attributeWriteDeleteConflict(attributeWrites, attributeDeletes) {
 		return WriteDataRequest{}, invalidArgument("data write contains a write/delete intersection")
 	}
@@ -593,6 +641,9 @@ func validCanonicalAttributes(values []Attribute) bool {
 		if index > 0 && (compareAttributeKey(values[index-1], value) == 0 || compareAttribute(values[index-1], value) >= 0) {
 			return false
 		}
+		if index > 0 && attributePathPrefixConflict(values[index-1].entity, values[index-1].path, value.entity, value.path) {
+			return false
+		}
 	}
 	return true
 }
@@ -600,6 +651,9 @@ func validCanonicalAttributes(values []Attribute) bool {
 func validCanonicalAttributeKeys(values []AttributeKey) bool {
 	for index, value := range values {
 		if !value.valid() || (index > 0 && compareAttributeDeleteKey(values[index-1], value) >= 0) {
+			return false
+		}
+		if index > 0 && attributePathPrefixConflict(values[index-1].entity, values[index-1].path, value.entity, value.path) {
 			return false
 		}
 	}
@@ -621,15 +675,15 @@ func canonicalTupleKeys(values []TupleKey) []TupleKey {
 }
 
 func compareAttributeDeleteKey(left, right AttributeKey) int {
-	for _, pair := range [][2]string{{left.entity.Type, right.entity.Type}, {left.entity.ID, right.entity.ID}, {left.name, right.name}} {
+	for _, pair := range [][2]string{{left.entity.Type, right.entity.Type}, {left.entity.ID, right.entity.ID}} {
 		if order := cmp.Compare(pair[0], pair[1]); order != 0 {
 			return order
 		}
 	}
-	return 0
+	return compareAttributePath(left.path, right.path)
 }
 
-func canonicalAttributeKeys(values []AttributeKey) []AttributeKey {
+func canonicalAttributeKeys(values []AttributeKey) ([]AttributeKey, error) {
 	result := cloneSlice(values)
 	sort.Slice(result, func(i, j int) bool { return compareAttributeDeleteKey(result[i], result[j]) < 0 })
 	write := 0
@@ -637,10 +691,13 @@ func canonicalAttributeKeys(values []AttributeKey) []AttributeKey {
 		if write > 0 && compareAttributeDeleteKey(result[write-1], value) == 0 {
 			continue
 		}
+		if write > 0 && attributePathPrefixConflict(result[write-1].entity, result[write-1].path, value.entity, value.path) {
+			return nil, invalidArgument("same entity has conflicting attribute path prefixes")
+		}
 		result[write] = value
 		write++
 	}
-	return result[:write]
+	return result[:write], nil
 }
 
 func tupleWriteDeleteConflict(writes []RelationshipTuple, deletes []TupleKey) bool {
@@ -662,9 +719,9 @@ func tupleWriteDeleteConflict(writes []RelationshipTuple, deletes []TupleKey) bo
 func attributeWriteDeleteConflict(writes []Attribute, deletes []AttributeKey) bool {
 	writeIndex, deleteIndex := 0, 0
 	for writeIndex < len(writes) && deleteIndex < len(deletes) {
-		left := AttributeKey{entity: writes[writeIndex].entity, name: writes[writeIndex].name}
+		left := AttributeKey{entity: writes[writeIndex].entity, path: writes[writeIndex].path}
 		order := compareAttributeDeleteKey(left, deletes[deleteIndex])
-		if order == 0 {
+		if order == 0 || attributePathPrefixConflict(left.entity, left.path, deletes[deleteIndex].entity, deletes[deleteIndex].path) {
 			return true
 		}
 		if order < 0 {
@@ -674,4 +731,29 @@ func attributeWriteDeleteConflict(writes []Attribute, deletes []AttributeKey) bo
 		}
 	}
 	return false
+}
+
+func compareAttributePath(left, right []string) int {
+	for index := 0; index < len(left) && index < len(right); index++ {
+		if order := cmp.Compare(left[index], right[index]); order != 0 {
+			return order
+		}
+	}
+	return cmp.Compare(len(left), len(right))
+}
+
+func attributePathPrefixConflict(leftEntity dsl.EntityRef, leftPath []string, rightEntity dsl.EntityRef, rightPath []string) bool {
+	if leftEntity != rightEntity || len(leftPath) == len(rightPath) {
+		return false
+	}
+	shorter, longer := leftPath, rightPath
+	if len(shorter) > len(longer) {
+		shorter, longer = longer, shorter
+	}
+	for index := range shorter {
+		if shorter[index] != longer[index] {
+			return false
+		}
+	}
+	return true
 }

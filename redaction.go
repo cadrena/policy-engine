@@ -194,6 +194,9 @@ func (Attribute) String() string { return redactedString("Attribute") }
 // GoString returns a privacy-safe Go-syntax representation.
 func (Attribute) GoString() string { return redactedString("Attribute") }
 
+// Format redacts attribute fields for every fmt verb.
+func (Attribute) Format(state fmt.State, _ rune) { writeRedactedFormat(state, "Attribute") }
+
 // LogValue returns privacy-safe structured metadata.
 func (Attribute) LogValue() slog.Value { return redactedLogValue("Attribute") }
 
@@ -203,6 +206,9 @@ func (AttributeKey) String() string { return redactedString("AttributeKey") }
 // GoString returns a privacy-safe Go-syntax representation.
 func (AttributeKey) GoString() string { return redactedString("AttributeKey") }
 
+// Format redacts attribute-key fields for every fmt verb.
+func (AttributeKey) Format(state fmt.State, _ rune) { writeRedactedFormat(state, "AttributeKey") }
+
 // LogValue returns privacy-safe structured metadata.
 func (AttributeKey) LogValue() slog.Value { return redactedLogValue("AttributeKey") }
 
@@ -211,6 +217,9 @@ func (ContextualData) String() string { return redactedString("ContextualData") 
 
 // GoString returns a privacy-safe Go-syntax representation.
 func (ContextualData) GoString() string { return redactedString("ContextualData") }
+
+// Format redacts contextual facts for every fmt verb.
+func (ContextualData) Format(state fmt.State, _ rune) { writeRedactedFormat(state, "ContextualData") }
 
 // LogValue returns privacy-safe structured metadata.
 func (ContextualData) LogValue() slog.Value { return redactedLogValue("ContextualData") }
@@ -374,6 +383,11 @@ func (WriteDataRequestInput) String() string { return redactedString("WriteDataR
 // GoString returns a privacy-safe Go-syntax representation.
 func (WriteDataRequestInput) GoString() string { return redactedString("WriteDataRequestInput") }
 
+// Format redacts write input fields for every fmt verb.
+func (WriteDataRequestInput) Format(state fmt.State, _ rune) {
+	writeRedactedFormat(state, "WriteDataRequestInput")
+}
+
 // LogValue returns privacy-safe structured metadata.
 func (WriteDataRequestInput) LogValue() slog.Value { return redactedLogValue("WriteDataRequestInput") }
 
@@ -382,6 +396,11 @@ func (WriteDataRequest) String() string { return redactedString("WriteDataReques
 
 // GoString returns a privacy-safe Go-syntax representation.
 func (WriteDataRequest) GoString() string { return redactedString("WriteDataRequest") }
+
+// Format redacts write-request fields for every fmt verb.
+func (WriteDataRequest) Format(state fmt.State, _ rune) {
+	writeRedactedFormat(state, "WriteDataRequest")
+}
 
 // LogValue returns privacy-safe structured metadata.
 func (WriteDataRequest) LogValue() slog.Value { return redactedLogValue("WriteDataRequest") }

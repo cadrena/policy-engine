@@ -58,6 +58,44 @@ func validateNamespacePattern(pattern string) error {
 func validIdentifier(value string) bool { return validateIdentifier(value) == nil }
 func validNamespace(value string) bool  { return validateNamespace(value) == nil }
 
+func validateAttributePath(path []string) error {
+	if len(path) == 0 {
+		return invalidArgument("attribute path is empty")
+	}
+	if len(path) > MaxAggregateWorkItems {
+		return resourceExhausted()
+	}
+	budget := budgetCounter{max: MaxAggregateInputBytes}
+	if err := addAttributePathCost(&budget, path); err != nil {
+		return err
+	}
+	for _, segment := range path {
+		if err := validateIdentifier(segment); err != nil {
+			return err
+		}
+		if !validDSLIdentifier(segment) {
+			return invalidArgument("attribute path segment is not a DSL identifier")
+		}
+	}
+	return nil
+}
+
+func validDSLIdentifier(value string) bool {
+	if value == "" || !isDSLIdentifierStart(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		if !isDSLIdentifierStart(value[index]) && (value[index] < '0' || value[index] > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func isDSLIdentifierStart(value byte) bool {
+	return value == '_' || (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')
+}
+
 func validRevisionIDString(value string) bool {
 	if len(value) != 64 {
 		return false
