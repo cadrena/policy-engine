@@ -11,6 +11,7 @@ jobs:
   quality:
     name: Quality and public boundary (Go ${{ matrix.go-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +54,9 @@ jobs:
 
       - name: Enforce public boundary
         run: make boundary
+
+      - name: Test public boundary regressions
+        run: make boundary-test
 
       - name: Scan secrets in working tree and Git history
         run: make gitleaks
