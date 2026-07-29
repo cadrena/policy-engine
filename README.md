@@ -49,6 +49,10 @@ The standalone server is compatible with Connect, gRPC, and gRPC-Web.
 
 <!-- markdown-link-check-disable -->
 
+<!--
+The canonical URL becomes reachable when the pre-V1 public DSL is published.
+-->
+
 Policies are authored in the Conductera textual DSL provided by tagged releases
 of [`github.com/conductera/dsl`](https://github.com/conductera/dsl). V1 does not
 execute CEL, Rego, JavaScript, Go plugins, WASM, or network-backed policy
@@ -87,7 +91,7 @@ normative contract.
 ## Explicit V1 non-goals
 
 - No `filter`, `FilterCandidates`, global reverse lookup, candidate discovery,
-  or unbounded graph expansion
+  or global graph-expansion API
 - No streaming Watch or final-decision cache
 - No PostgreSQL or distributed or multi-region storage
 - No central registry, distribution, promotion, rollout, scheduling, or drift

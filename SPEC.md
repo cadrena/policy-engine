@@ -158,6 +158,7 @@ cross-namespace existence.
 ```text
 UNSET
   -- Activate(target, expected=unset) --> ACTIVE(target, generation=1)
+  -- Activate(target, expected!=unset) --> UNSET + conflict
   -- Activate(missing/incompatible target) --> UNSET + typed error
 
 ACTIVE(current, generation=n)
@@ -231,9 +232,11 @@ Every `Check`, `BatchCheck`, and `Explain` MUST perform the following sequence:
 12. Produce one policy result or one typed engine error.
 13. Submit privacy-safe metadata to `DecisionEventSink` on a best-effort basis.
 
-Failure at any step stops the operation with a typed engine error and MUST NOT
-fall through to evaluation, a stale result, or a partial authoritative result.
-In-flight activation or data writes MUST NOT change a pinned request.
+Failure at any of steps 1 through 12 stops the operation with a typed engine
+error and MUST NOT fall through to evaluation, a stale result, or a partial
+authoritative result. Step 13 is best-effort: a sink error or drop MUST be
+reported safely and MUST NOT change the completed decision. In-flight
+activation or data writes MUST NOT change a pinned request.
 
 Evaluation MUST be deterministic, side-effect-free, and network-free after
 trusted extension results and snapshot resolution. Request budgets MAY lower
