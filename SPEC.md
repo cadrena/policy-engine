@@ -107,7 +107,7 @@ be enforced by the shared core in embedded and standalone modes.
 | `authorization.contextual_data` | Add trusted request-scoped tuples or attributes | Requires `authorization.check` too |
 | `authorization.explicit_revision` | Evaluate an exact revision instead of a slot | Requires `authorization.check`; does not grant policy read or mutation |
 | `authorization.explain` | Request redacted `Explain` output | Requires `authorization.check`; other additive capabilities still apply |
-| `data.write` | Atomic persistent tuple or attribute writes and deletes | Includes selecting the explicit validation revision for that write only |
+| `data.write` | Read current data-generation metadata; atomically write or delete persistent tuples and attributes | Includes selecting the explicit validation revision for that write only; does not disclose stored data |
 | `events.read` | Bounded `ListEvents` | Does not imply decision-audit access |
 | `system.status` | Detailed component and readiness status | Coarse liveness exposure remains a deployment decision |
 
@@ -153,6 +153,10 @@ Runtime-specific Go `Program` values MUST remain cache-only. V1 MUST NOT delete
 semantic revisions. Lookup MUST be namespace-isolated and MUST NOT reveal
 cross-namespace existence.
 
+`policy.read` returns revision metadata only. It MUST NOT expose an artifact,
+canonical source, IR, compiled program, or other policy content. Artifact bytes
+and compiled values remain internal to the application and storage boundaries.
+
 ## 7. Optional local slot state machine
 
 ```text
@@ -162,15 +166,18 @@ UNSET
   -- Activate(missing/incompatible target) --> UNSET + typed error
 
 ACTIVE(current, generation=n)
-  -- Activate(target, expected=current) --> ACTIVE(target, generation=n+1)
-  -- Activate(target, stale expected) --> unchanged + conflict
+  -- Activate(target, expected=(current,n)) --> ACTIVE(target, generation=n+1)
+  -- Activate(target, stale expected revision or generation) --> unchanged + conflict
   -- Activate(missing/incompatible target) --> unchanged + typed error
 ```
 
-Activation MUST be atomic CAS. The target revision MUST be durably readable in
-the same namespace before the slot changes. Every successful activation MUST
-increase slot generation monotonically. Rollback MUST be a normal CAS
-activation of an older revision. Publish and activation MUST remain separate.
+Activation MUST be atomic, ABA-safe CAS. Its precondition MUST represent exactly
+an unset slot or an active slot's revision and positive generation. Both the
+expected revision and generation MUST match before an active slot changes. The
+target revision MUST be durably readable in the same namespace before the slot
+changes. Every successful activation MUST increase slot generation
+monotonically. Rollback MUST be a normal CAS activation of an older revision.
+Publish and activation MUST remain separate.
 
 A failed or stale activation MUST leave slot state and history unchanged.
 Activation history MUST be append-only and locally bounded. Canary, scheduling,
@@ -193,6 +200,10 @@ deletes MUST commit atomically. Generation order MUST follow atomic commit
 order, not transaction start time, timestamp, or random identifier. Each write
 MUST provide an explicit loaded `validation_revision_id` and MUST be validated
 against that revision before mutation.
+
+The empty dataset starts at generation `0`; the first successful mutation
+commits generation `1`. `GetDataGeneration` returns only the current generation
+metadata, requires `data.write`, and MUST NOT disclose tuples or attributes.
 
 The exact successful generation used by reads and decisions MUST be returned.
 `minimum_generation` is a lower bound only and MUST NOT be treated as an exact
@@ -243,6 +254,12 @@ trusted extension results and snapshot resolution. Request budgets MAY lower
 configured budgets but MUST NOT raise them. Cache eviction or miss MUST NOT
 change semantics. No final decision cache is permitted in V1.
 
+The module-root V1 hard maxima for identifiers, source and artifact bytes,
+collections, evidence, pages, extension outputs, aggregate bytes, and work are
+stable public limits. Deployment or per-request configuration MAY lower these
+maxima and MUST NOT raise them. Limit checks MUST occur before attacker-sized
+allocation, cloning, sorting, or extension work.
+
 ## 10. Decision and evidence state machine
 
 Base DSL decisions are combined as follows:
@@ -277,6 +294,11 @@ evidence, timeout, cancellation, verifier error, malformed output, or the reject
 default MUST return a typed engine error. Approval evidence MUST never widen a
 graph or guard `DENY`.
 
+Each approval verification MUST receive an immutable evidence binding over the
+authenticated caller, byte-exact namespace, original selector, resolved exact
+revision, slot generation when applicable, exact data generation, one captured
+evaluation time, and one fixed-size canonical request fingerprint.
+
 ### Delegation evidence
 
 ```text
@@ -296,6 +318,9 @@ data. Invalid evidence, timeout, cancellation, verifier failure, malformed
 output, or the reject default MUST return a typed engine error. Delegation
 evidence MUST never bypass caller capability checks.
 
+Each delegation verification MUST receive the same exact immutable evaluation
+binding. Evidence or verifier output MUST NOT rewrite any binding field.
+
 ## 11. Basic BatchCheck
 
 A batch MUST contain one namespace and one shared slot or exact revision
@@ -306,6 +331,11 @@ All items MUST obey hard item, input, graph-work, and datastore-read limits.
 Policy `DENY` and `REQUIRE_APPROVAL` are valid item results. Any engine error
 MUST fail the complete batch; returned partial items MUST NOT be treated as
 authoritative. Batch order and results MUST be deterministic.
+
+When a batch supplies approval or delegation evidence, its evidence fingerprint
+MUST canonically bind the complete ordered batch and every item semantic. It MUST
+NOT be an item-level fingerprint and MUST NOT be reusable across a reordered or
+otherwise different batch.
 
 `BatchCheck` is not global reverse lookup, candidate discovery, graph expansion,
 or fleet-scale evaluation.
@@ -380,10 +410,24 @@ capability-protected, cursor-based, and bounded. Expired cursors MUST return
 `CURSOR_EXPIRED` and require full local-state resynchronization. Event retention
 MUST be bounded. V1 MUST NOT expose streaming Watch.
 
+Every revision, activation-history, and state-event response page MUST be bound
+to its originating validated request, MUST NOT exceed the request limit or the
+public hard maximum, and MUST reject out-of-scope or duplicate items. Revision
+pages are ordered by publication time ascending and then revision ID ascending.
+Activation-history pages are ordered by strictly increasing slot generation.
+Event cursors are opaque: adapters MUST return store-monotonic order, while the
+public constructor preserves that order and rejects duplicate cursors rather
+than applying a lexical cursor comparison.
+
 Decision events are separate from state events. `DecisionEventSink` delivery is
 best-effort only in public V1. Sink failure MUST NOT change a completed decision.
+Cancellation during sink delivery MUST report `CANCELED`; deadline expiry MUST
+report `DEADLINE_EXCEEDED`, without exposing sink-provided details.
 Public telemetry MUST NOT place raw IDs, arguments, attributes, tuples,
 contextual facts, evidence, or tokens in labels or normal trace fields.
+Security-sensitive exported values and construction inputs MUST also redact
+those dynamic values under default `fmt` formatting and structured logging;
+explicit typed accessors remain the only supported raw-value path.
 
 ## 15. Extension ports and defaults
 
@@ -404,6 +448,23 @@ deadlines. Verifier and authorizer output MUST be structurally validated.
 Unknown or over-broad returned facts or capabilities MUST be rejected.
 Extension-port absence MUST never silently grant authorization. The no-op sink
 MUST never be described as durable audit.
+
+The public invocation boundary MUST return on cancellation or deadline even
+when an extension fails to cooperate. Panic-contained invocation workers and
+abandoned calls MUST be concurrency-bounded; saturation MUST fail closed with
+`RESOURCE_EXHAUSTED`. Extensions remain responsible for observing context so
+their underlying work terminates. A matching authorizer grant MUST contain no
+capability outside the exact canonical requested set.
+Authorizer, approval-verifier, delegation-verifier, and sink quotas MUST be
+independently bounded within the overall hard bound so one failing port cannot
+starve another. Sanitization MUST NOT invoke extension-controlled `error`
+methods; only a direct non-nil `*EngineError` may preserve a typed category.
+
+Public configuration options MUST be sealed values produced by the module's
+`With*` constructors. Their zero value is invalid; external packages MUST NOT be
+able to supply arbitrary option callbacks. Nil and typed-nil extension ports,
+option panics, and malformed option results MUST fail closed with sanitized typed
+errors.
 
 Public documentation and conformance suites describe interfaces and behavior,
 not commercial implementations. Extension composition MUST be compile-time; V1

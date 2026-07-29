@@ -69,7 +69,7 @@ are not part of the public runtime.
 | Invalid or unsupported artifact | Typed error; no revision stored or used |
 | Publish failure | Existing revisions and slot unchanged |
 | Missing slot or revision | Typed error, never `DENY` or `ALLOW` |
-| Stale activation CAS | `CONFLICT`; slot unchanged |
+| Stale activation revision or generation CAS | `CONFLICT`; slot unchanged |
 | Stale data-generation CAS | `CONFLICT`; dataset unchanged |
 | Idempotency key reused with changed payload | `CONFLICT`; no mutation |
 | Minimum generation unavailable by deadline | Typed timeout or precondition error |
@@ -129,6 +129,11 @@ canonicalization, encoding, and durable commit succeed. Publication never
 activates a slot, and failed publication cannot change active traffic.
 Runtime-specific Go programs are cache-only.
 
+Activation uses an ABA-safe expectation: either the slot is unset, or both its
+active revision and positive generation match. `policy.read` exposes metadata
+only; artifact bytes, canonical source, IR, and compiled programs remain inside
+trusted application and storage boundaries.
+
 ## 7. Data and contextual-fact security
 
 Comparisons are typed. The engine performs no string, number, boolean, null, or
@@ -139,6 +144,10 @@ write is validated against an explicit, loaded validation revision. Writes,
 deletes, the generation increment, idempotency record, and state event commit
 atomically or not at all. The exact committed data generation used by a read or
 decision is returned.
+
+The initial empty dataset is generation `0`, and the first successful mutation
+commits generation `1`. The metadata-only `GetDataGeneration` operation requires
+`data.write` and does not disclose tuples or attributes.
 
 Contextual data requires separate authorization. It is request-scoped,
 additive, bounded, and validated against the selected artifact. It cannot delete
@@ -166,6 +175,12 @@ resource, selector, selected revision, or persisted data. Invalid evidence,
 timeout, cancellation, verifier failure, or malformed output produces a typed
 engine error for that check.
 
+Every verifier call is bound to the authenticated caller, byte-exact namespace,
+original selector, resolved revision, slot generation when applicable, exact
+data generation, one captured evaluation time, and a fixed-size canonical
+request fingerprint. A batch fingerprint covers the complete ordered batch and
+all item semantics; it is not reusable per item or across different batches.
+
 Outstanding approval requirements without evidence produce
 `REQUIRE_APPROVAL`. Valid verified evidence may satisfy identified requirements;
 partial satisfaction leaves a lexically sorted set of unsatisfied requirements.
@@ -191,6 +206,19 @@ captures time once. Per-request budgets MAY lower configured limits but MUST NOT
 raise them. Exhaustion fails with `RESOURCE_EXHAUSTED`, `CANCELED`, or
 `DEADLINE_EXCEEDED`; it never falls back to an allow.
 
+Public extension invocation returns on cancellation or deadline even if an
+adapter does not cooperate. Panic-contained workers and abandoned calls are
+concurrency-bounded; saturation fails closed with `RESOURCE_EXHAUSTED`.
+Adapters must still observe context to terminate their underlying work.
+Each extension port has an independent quota within the overall bound, so a
+verifier or sink outage cannot consume caller-authorizer capacity. Error
+sanitization does not invoke adapter-controlled `As`, `Unwrap`, or equivalent
+methods; only a direct non-nil `*EngineError` preserves its stable category.
+
+The exported module-root hard maxima are stable V1 security boundaries. Checks
+must reject oversized input before attacker-sized allocation, cloning, sorting,
+or extension work. Deployment configuration may lower but never raise them.
+
 ## 10. Privacy and observability
 
 Normal logs, metric labels, trace fields, errors, and `Explain` MUST NOT expose
@@ -200,6 +228,10 @@ paths, operators, action and rule names, boolean outcomes, reason codes,
 revision identifiers, generations, and sorted requirement identifiers may be
 reported when their disclosure is authorized and safe.
 
+Security-sensitive exported request, input, collection, and result values must
+redact dynamic content under default `fmt` formatting, Go-syntax formatting,
+and `slog`. Raw values are available only through explicit typed accessors.
+
 `Explain` is a separate capability-protected operation. It redacts dynamic
 values and preserves the exact `Check` decision and pinned snapshot. A DSL trace
 may exist internally, but the engine does not expose its raw values.
@@ -208,6 +240,18 @@ may exist internally, but the engine does not expose its raw values.
 enterprise audit. Sink or telemetry failure cannot authorize, deny, or alter an
 otherwise completed decision. Drops and failures must be reported without
 leaking request values.
+
+Extension options are sealed module values: only package-provided `With*`
+constructors create meaningful options. Zero options, nil or typed-nil ports,
+option panics, and malformed option results fail closed. Sink cancellation and
+deadline expiry retain their distinct sanitized `CANCELED` and
+`DEADLINE_EXCEEDED` categories.
+
+Revision, activation-history, and state-event pages are validated against their
+originating request scope and limit. Duplicate or out-of-scope entries are
+rejected. Revision and activation pages enforce their normative deterministic
+orders. Event cursors remain opaque and store-monotonic; the public boundary
+preserves adapter order and rejects duplicate cursors without lexical inference.
 
 ## 11. Operational responsibilities and non-goals
 
