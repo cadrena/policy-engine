@@ -283,12 +283,6 @@ func (s *Store) notifyGenerationWaitersLocked(namespace string) {
 	close(wait.changed)
 }
 
-func (s *Store) consumeEventFailureLocked() bool {
-	failed := s.failNextEvent
-	s.failNextEvent = false
-	return failed
-}
-
 func (s *Store) armNextEventFailure() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
