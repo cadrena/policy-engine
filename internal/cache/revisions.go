@@ -15,6 +15,7 @@ var (
 	errInvalidLimits      = errors.New("cache: invalid limits")
 	errInvalidArtifact    = errors.New("cache: invalid compiled artifact")
 	errNilLoader          = errors.New("cache: nil revision loader")
+	errLoaderPanic        = errors.New("cache: revision loader panicked")
 )
 
 // RevisionKey identifies one compiled program exactly.
@@ -163,25 +164,42 @@ func (c *RevisionCache) loadRevision(
 	call *revisionCall,
 	loader func(context.Context) (*dsl.Artifact, error),
 ) {
-	artifact, err := loader(call.ctx)
 	var value HydratedRevision
-	if err == nil {
-		value, err = hydrateRevision(key, artifact)
-	}
+	var loadErr error
+	defer func() {
+		if recover() != nil {
+			value = HydratedRevision{}
+			loadErr = errLoaderPanic
+		}
+		c.completeRevisionLoad(key, call, value, loadErr)
+	}()
 
+	var artifact *dsl.Artifact
+	artifact, loadErr = loader(call.ctx)
+	if loadErr == nil {
+		value, loadErr = hydrateRevision(key, artifact)
+	}
+}
+
+func (c *RevisionCache) completeRevisionLoad(
+	key RevisionKey,
+	call *revisionCall,
+	value HydratedRevision,
+	loadErr error,
+) {
+	defer call.cancel()
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	current, currentExists := c.inflight[key]
 	if currentExists && current == call {
 		delete(c.inflight, key)
 	}
-	if err == nil && !call.abandoned {
+	if loadErr == nil && !call.abandoned {
 		value = c.admitLocked(key, value)
 	}
 	call.value = value
-	call.err = err
+	call.err = loadErr
 	close(call.done)
-	c.mu.Unlock()
-	call.cancel()
 }
 
 func (c *RevisionCache) waitForRevision(

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -317,6 +318,67 @@ func TestRevisionCacheSharesConcurrentLoadErrorAndRetries(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("loader calls after retry = %d, want 2", got)
+	}
+}
+
+func TestRevisionCacheLoaderPanicWakesWaitersAndAllowsRetry(t *testing.T) {
+	t.Parallel()
+
+	cache := mustRevisionCache(t, RevisionLimits{MaxEntries: 8, MaxBytes: 1 << 20})
+	key := mustRevisionKey(t, "tenant-a", "revision-1", "abi-v1")
+	const secret = "private panic payload"
+	const callers = 2
+	start := make(chan struct{})
+	arrived := make(chan struct{}, callers)
+	loaderEntered := make(chan struct{})
+	releasePanic := make(chan struct{})
+	errs := make(chan error, callers)
+	var loaderOnce sync.Once
+	for range callers {
+		go func() {
+			<-start
+			arrived <- struct{}{}
+			_, err := cache.GetOrLoad(context.Background(), key, func(context.Context) (*dsl.Artifact, error) {
+				loaderOnce.Do(func() { close(loaderEntered) })
+				<-releasePanic
+				panic(secret)
+			})
+			errs <- err
+		}()
+	}
+	close(start)
+	for range callers {
+		awaitSignal(t, arrived, "panic caller arrival")
+	}
+	awaitClosed(t, loaderEntered, "panic loader entry")
+	awaitFlightWaiters(t, cache, key, callers)
+	close(releasePanic)
+	for range callers {
+		err := awaitError(t, errs, "sanitized loader panic")
+		if err == nil || err.Error() != "cache: revision loader panicked" {
+			t.Fatalf("GetOrLoad() error = %v, want stable loader panic error", err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("GetOrLoad() error leaked panic payload: %q", err)
+		}
+	}
+
+	artifact := mustArtifact(t, "entity retry {}")
+	retryLoads := 0
+	for range 2 {
+		value, err := cache.GetOrLoad(context.Background(), key, func(context.Context) (*dsl.Artifact, error) {
+			retryLoads++
+			return artifact, nil
+		})
+		if err != nil {
+			t.Fatalf("retry GetOrLoad() error = %v", err)
+		}
+		if value.Program() == nil {
+			t.Fatal("retry GetOrLoad().Program() = nil")
+		}
+	}
+	if retryLoads != 1 {
+		t.Fatalf("retry loader calls = %d, want 1 successful admission", retryLoads)
 	}
 }
 

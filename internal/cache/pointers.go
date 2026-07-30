@@ -109,8 +109,9 @@ func NewPointerCache(maxEntries int) (*PointerCache, error) {
 	}, nil
 }
 
-// UpdateCommitted records state only after its authoritative CAS has committed.
-// Stale or conflicting generations cannot roll the optimization backward.
+// UpdateCommitted refreshes a resident pointer after its authoritative CAS has
+// committed. An update never fills a miss, so delayed best-effort delivery
+// cannot resurrect an evicted generation.
 func (c *PointerCache) UpdateCommitted(key SlotKey, pointer SlotPointer) error {
 	if !key.valid() {
 		return errInvalidSlotKey
@@ -121,21 +122,28 @@ func (c *PointerCache) UpdateCommitted(key SlotKey, pointer SlotPointer) error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	existing, ok := c.entries[key]
+	if !ok {
+		return nil
+	}
+	return c.updateResidentLocked(existing, pointer)
+}
+
+// FillAuthoritative admits pointer state returned by an authoritative lookup
+// after a cache miss. A concurrent resident update still retains the monotonic
+// generation and conflict checks.
+func (c *PointerCache) FillAuthoritative(key SlotKey, pointer SlotPointer) error {
+	if !key.valid() {
+		return errInvalidSlotKey
+	}
+	if !pointer.valid() {
+		return errInvalidSlotPointer
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if existing, ok := c.entries[key]; ok {
-		switch {
-		case pointer.generation < existing.pointer.generation:
-			return errStalePointer
-		case pointer.generation == existing.pointer.generation &&
-			pointer.revision != existing.pointer.revision:
-			return errPointerConflict
-		case pointer.generation == existing.pointer.generation:
-			c.recency.MoveToFront(existing.recency)
-			return nil
-		default:
-			existing.pointer = pointer
-			c.recency.MoveToFront(existing.recency)
-			return nil
-		}
+		return c.updateResidentLocked(existing, pointer)
 	}
 	if c.maxEntries == 0 {
 		return nil
@@ -147,6 +155,23 @@ func (c *PointerCache) UpdateCommitted(key SlotKey, pointer SlotPointer) error {
 	entry.recency = c.recency.PushFront(entry)
 	c.entries[key] = entry
 	return nil
+}
+
+func (c *PointerCache) updateResidentLocked(existing *pointerEntry, pointer SlotPointer) error {
+	switch {
+	case pointer.generation < existing.pointer.generation:
+		return errStalePointer
+	case pointer.generation == existing.pointer.generation &&
+		pointer.revision != existing.pointer.revision:
+		return errPointerConflict
+	case pointer.generation == existing.pointer.generation:
+		c.recency.MoveToFront(existing.recency)
+		return nil
+	default:
+		existing.pointer = pointer
+		c.recency.MoveToFront(existing.recency)
+		return nil
+	}
 }
 
 // Pin returns an immutable request-local snapshot. Later committed updates do
