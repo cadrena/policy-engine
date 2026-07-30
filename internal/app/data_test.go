@@ -21,6 +21,8 @@ entity document {
 }
 guard document.view {
     allow when resource.amount == 5000
+    allow when resource.metadata == "public"
+    allow when resource.metadata.classification == "public"
     allow otherwise
 }
 `
@@ -142,7 +144,7 @@ func TestContextualAttributeEqualToPersistentValueIsAcceptedOnce(t *testing.T) {
 	contextual, err := policyengine.NewContextualData(nil, []policyengine.Attribute{persistent})
 	requireNoError(t, err)
 
-	normalized, err := domain.NormalizeContextualData(ctx, snapshot, contextual)
+	normalized, err := dataSchema(t).NormalizeContextualData(ctx, snapshot, contextual)
 	requireNoError(t, err)
 	if got := len(normalized.Attributes()); got != 0 {
 		t.Fatalf("normalized contextual attributes = %d, want 0 duplicate overlays", got)
@@ -162,7 +164,50 @@ func TestContextualAttributeDifferentFromPersistentValueIsInvalid(t *testing.T) 
 		[]policyengine.Attribute{amountAttribute(t, "doc-1", 6000)})
 	requireNoError(t, err)
 
-	_, err = domain.NormalizeContextualData(ctx, snapshot, contextual)
+	_, err = dataSchema(t).NormalizeContextualData(ctx, snapshot, contextual)
+	requireCategory(t, err, policyengine.ErrorInvalidArgument)
+}
+
+func TestContextualAttributeDescendantConflictsWithPersistentScalar(t *testing.T) {
+	ctx := context.Background()
+	service, memoryStore := newDataServiceFixture(t)
+	persistent := stringAttribute(t, "doc-1", []string{"metadata"}, "public")
+	request := writeRequest(t, "tenant-a", 0, "attribute-prefix-1", nil,
+		[]policyengine.Attribute{persistent})
+	_, err := service.WriteData(ctx, dataWriterCaller(t), request)
+	requireNoError(t, err)
+	snapshot := openSnapshot(t, memoryStore, "tenant-a", 1)
+	defer func() { requireNoError(t, snapshot.Close()) }()
+	contextual, err := policyengine.NewContextualData(nil, []policyengine.Attribute{
+		stringAttribute(t, "doc-1", []string{"metadata", "classification"}, "public"),
+	})
+	requireNoError(t, err)
+
+	_, err = dataSchema(t).NormalizeContextualData(ctx, snapshot, contextual)
+	requireCategory(t, err, policyengine.ErrorInvalidArgument)
+}
+
+func TestContextualAttributeScalarConflictsWithPersistentDescendant(t *testing.T) {
+	ctx := context.Background()
+	service, memoryStore := newDataServiceFixture(t)
+	persistent := stringAttribute(
+		t,
+		"doc-1",
+		[]string{"metadata", "classification"},
+		"public",
+	)
+	request := writeRequest(t, "tenant-a", 0, "attribute-prefix-2", nil,
+		[]policyengine.Attribute{persistent})
+	_, err := service.WriteData(ctx, dataWriterCaller(t), request)
+	requireNoError(t, err)
+	snapshot := openSnapshot(t, memoryStore, "tenant-a", 1)
+	defer func() { requireNoError(t, snapshot.Close()) }()
+	contextual, err := policyengine.NewContextualData(nil, []policyengine.Attribute{
+		stringAttribute(t, "doc-1", []string{"metadata"}, "public"),
+	})
+	requireNoError(t, err)
+
+	_, err = dataSchema(t).NormalizeContextualData(ctx, snapshot, contextual)
 	requireCategory(t, err, policyengine.ErrorInvalidArgument)
 }
 
@@ -247,6 +292,33 @@ func amountAttribute(t testing.TB, documentID string, amount int64) policyengine
 	)
 	requireNoError(t, err)
 	return attribute
+}
+
+func stringAttribute(
+	t testing.TB,
+	documentID string,
+	path []string,
+	value string,
+) policyengine.Attribute {
+	t.Helper()
+	typed, err := policyengine.NewStringValue(value)
+	requireNoError(t, err)
+	attribute, err := policyengine.NewAttributePath(
+		dsl.EntityRef{Type: "document", ID: documentID},
+		path,
+		typed,
+	)
+	requireNoError(t, err)
+	return attribute
+}
+
+func dataSchema(t testing.TB) domain.DataSchema {
+	t.Helper()
+	artifact, err := dsl.CompileArtifact("data-policy.cdr", []byte(dataPolicySource))
+	requireNoError(t, err)
+	schema, err := domain.NewDataSchema(artifact)
+	requireNoError(t, err)
+	return schema
 }
 
 func dataWriterCaller(t testing.TB) policyengine.Caller {

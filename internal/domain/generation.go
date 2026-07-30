@@ -13,7 +13,7 @@ type DataSchema struct {
 
 type dataEntity struct {
 	relations      map[string][]dsl.RelationTarget
-	attributePaths map[string]struct{}
+	attributePaths *attributePathTrie
 }
 
 // NewDataSchema derives tuple and persistent-attribute validation indexes from
@@ -30,7 +30,7 @@ func NewDataSchema(artifact *dsl.Artifact) (DataSchema, error) {
 	for _, entity := range schema.Entities {
 		indexed := dataEntity{
 			relations:      make(map[string][]dsl.RelationTarget, len(entity.Relations)),
-			attributePaths: make(map[string]struct{}),
+			attributePaths: newAttributePathTrie(),
 		}
 		for _, relation := range entity.Relations {
 			indexed.relations[relation.Name] = append([]dsl.RelationTarget(nil), relation.Targets...)

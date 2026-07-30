@@ -2,7 +2,7 @@ package domain
 
 import (
 	"context"
-	"strings"
+	"sort"
 
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
@@ -30,14 +30,14 @@ func (s DataSchema) validAttributePath(entity dsl.EntityRef, path []string) bool
 	if !ok {
 		return false
 	}
-	_, ok = indexed.attributePaths[strings.Join(path, "\x00")]
-	return ok
+	return indexed.attributePaths.contains(path)
 }
 
 // NormalizeContextualData preserves additive contextual facts while removing
 // an attribute already represented by the persistent snapshot. A different
-// value at the same entity path would be an override and is rejected.
-func NormalizeContextualData(
+// value at the same entity path, or any occupied strict prefix/descendant,
+// would be an override and is rejected.
+func (s DataSchema) NormalizeContextualData(
 	ctx context.Context,
 	snapshot store.Snapshot,
 	contextual policyengine.ContextualData,
@@ -54,21 +54,35 @@ func NormalizeContextualData(
 	}
 	additive := make([]policyengine.Attribute, 0, len(validated.Attributes()))
 	for _, attribute := range validated.Attributes() {
-		key, err := policyengine.NewAttributeKeyPath(attribute.Entity(), attribute.Path())
-		if err != nil {
-			return policyengine.ContextualData{}, err
-		}
-		persistent, err := snapshot.GetAttribute(ctx, key)
-		if err != nil {
-			return policyengine.ContextualData{}, err
-		}
-		value, found := persistent.Value()
-		if !found {
-			additive = append(additive, attribute)
-			continue
-		}
-		if !equalValue(value, attribute.Value()) {
+		entity, ok := s.entities[attribute.Entity().Type]
+		if !ok || !entity.attributePaths.contains(attribute.Path()) {
 			return policyengine.ContextualData{}, domainError(policyengine.ErrorInvalidArgument)
+		}
+		exactDuplicate := false
+		for _, path := range entity.attributePaths.comparablePaths(attribute.Path()) {
+			key, err := policyengine.NewAttributeKeyPath(attribute.Entity(), path)
+			if err != nil {
+				return policyengine.ContextualData{}, err
+			}
+			persistent, err := snapshot.GetAttribute(ctx, key)
+			if err != nil {
+				return policyengine.ContextualData{}, err
+			}
+			if !persistent.Valid() || !sameAttributeKey(persistent.Key(), key) {
+				return policyengine.ContextualData{}, domainError(policyengine.ErrorIntegrity)
+			}
+			value, found := persistent.Value()
+			if !found {
+				continue
+			}
+			if !equalPath(path, attribute.Path()) ||
+				!equalValue(value, attribute.Value()) {
+				return policyengine.ContextualData{}, domainError(policyengine.ErrorInvalidArgument)
+			}
+			exactDuplicate = true
+		}
+		if !exactDuplicate {
+			additive = append(additive, attribute)
 		}
 	}
 	return policyengine.NewContextualData(validated.Tuples(), additive)
@@ -98,11 +112,100 @@ func equalValue(left, right policyengine.Value) bool {
 	}
 }
 
-func collectResourcePaths(paths map[string]struct{}, condition dsl.ConditionExpression) {
+type attributePathTrie struct {
+	terminal bool
+	children map[string]*attributePathTrie
+}
+
+func newAttributePathTrie() *attributePathTrie {
+	return &attributePathTrie{children: make(map[string]*attributePathTrie)}
+}
+
+func (t *attributePathTrie) insert(path []string) {
+	current := t
+	for _, segment := range path {
+		next := current.children[segment]
+		if next == nil {
+			next = newAttributePathTrie()
+			current.children[segment] = next
+		}
+		current = next
+	}
+	current.terminal = true
+}
+
+func (t *attributePathTrie) contains(path []string) bool {
+	current := t
+	for _, segment := range path {
+		if current == nil {
+			return false
+		}
+		current = current.children[segment]
+	}
+	return current != nil && current.terminal
+}
+
+func (t *attributePathTrie) comparablePaths(path []string) [][]string {
+	current := t
+	prefix := make([]string, 0, len(path))
+	result := make([][]string, 0, len(path))
+	for _, segment := range path {
+		if current == nil {
+			return nil
+		}
+		current = current.children[segment]
+		if current == nil {
+			return nil
+		}
+		prefix = append(prefix, segment)
+		if current.terminal {
+			result = append(result, append([]string(nil), prefix...))
+		}
+	}
+	current.appendTerminalDescendants(&result, prefix)
+	return result
+}
+
+func (t *attributePathTrie) appendTerminalDescendants(result *[][]string, prefix []string) {
+	if t == nil {
+		return
+	}
+	segments := make([]string, 0, len(t.children))
+	for segment := range t.children {
+		segments = append(segments, segment)
+	}
+	sort.Strings(segments)
+	for _, segment := range segments {
+		child := t.children[segment]
+		path := append(append([]string(nil), prefix...), segment)
+		if child.terminal {
+			*result = append(*result, path)
+		}
+		child.appendTerminalDescendants(result, path)
+	}
+}
+
+func sameAttributeKey(left, right policyengine.AttributeKey) bool {
+	return left.Entity() == right.Entity() && equalPath(left.Path(), right.Path())
+}
+
+func equalPath(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func collectResourcePaths(paths *attributePathTrie, condition dsl.ConditionExpression) {
 	switch value := condition.(type) {
 	case dsl.ComparisonExpression:
 		if len(value.Field) > 1 && value.Field[0] == "resource" {
-			paths[strings.Join(value.Field[1:], "\x00")] = struct{}{}
+			paths.insert(value.Field[1:])
 		}
 	case *dsl.ComparisonExpression:
 		if value != nil {
