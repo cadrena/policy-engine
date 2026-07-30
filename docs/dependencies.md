@@ -1,10 +1,10 @@
 # Public Dependencies
 
-## Conductera DSL
+## Cadrena DSL
 
 The policy engine pins the public module `github.com/cadrena/dsl` at tag
-`v1.0.0`. That tag resolves to commit
-`54080d9aa503812645058d507631a9c04fb7ab2e` through normal public Go module
+`v1.1.1`. That tag resolves to commit
+`3b243c002d9dbb425ff7ada085ce533de2abf16f` through normal public Go module
 resolution without credentials.
 
 The dependency direction is strictly one way:
