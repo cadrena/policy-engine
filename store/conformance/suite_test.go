@@ -64,8 +64,11 @@ func TestConformanceHarnessRejectsBrokenAdapter(t *testing.T) {
 					close(entered)
 					contended := make(chan struct{})
 					close(contended)
+					waiterWoke := make(chan struct{})
+					close(waiterWoke)
 					return conformance.RevisionCommitPause{
-						Entered: entered, Contended: contended, Release: func() {},
+						Entered: entered, Contended: contended, WaiterWoke: waiterWoke,
+						Release: func() {}, ResumeWaiter: func() {},
 					}
 				},
 				ExpireEvents: func(context.Context, string, string) error {

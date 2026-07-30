@@ -160,12 +160,16 @@ type cursorState struct {
 }
 
 type pauseState struct {
-	entered       chan struct{}
-	contended     chan struct{}
-	release       chan struct{}
-	enteredOnce   sync.Once
-	contendedOnce sync.Once
-	releaseOnce   sync.Once
+	entered          chan struct{}
+	contended        chan struct{}
+	waiterWoke       chan struct{}
+	release          chan struct{}
+	resumeWaiter     chan struct{}
+	enteredOnce      sync.Once
+	contendedOnce    sync.Once
+	waiterWokeOnce   sync.Once
+	releaseOnce      sync.Once
+	resumeWaiterOnce sync.Once
 }
 
 type commitReservation struct {
@@ -315,9 +319,11 @@ func (s *Store) newPause(target **pauseState) *pauseState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pause := &pauseState{
-		entered:   make(chan struct{}),
-		contended: make(chan struct{}),
-		release:   make(chan struct{}),
+		entered:      make(chan struct{}),
+		contended:    make(chan struct{}),
+		waiterWoke:   make(chan struct{}),
+		release:      make(chan struct{}),
+		resumeWaiter: make(chan struct{}),
 	}
 	*target = pause
 	return pause

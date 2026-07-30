@@ -44,6 +44,7 @@ func (s *Store) PutRevision(ctx context.Context, write store.RevisionWrite) (sto
 		reservation, reserved = s.reserveCommitLocked(reservationKey)
 		if !reserved {
 			current := s.reservations[reservationKey]
+			waitPause := current.revisionPause
 			if current.revisionPause != nil {
 				current.revisionPause.contendedOnce.Do(func() {
 					close(current.revisionPause.contended)
@@ -53,6 +54,13 @@ func (s *Store) PutRevision(ctx context.Context, write store.RevisionWrite) (sto
 			s.mu.Unlock()
 			select {
 			case <-wait:
+				if waitPause != nil {
+					waitPause.waiterWokeOnce.Do(func() { close(waitPause.waiterWoke) })
+					<-waitPause.resumeWaiter
+				}
+				if err := safeContextError(ctx); err != nil {
+					return store.PutRevisionResult{}, err
+				}
 				continue
 			case <-done:
 				return store.PutRevisionResult{}, contextWaitError(ctx)
@@ -61,6 +69,9 @@ func (s *Store) PutRevision(ctx context.Context, write store.RevisionWrite) (sto
 		if existing, ok := s.revisions[namespace][metadata.ID()]; ok {
 			s.releaseCommitReservationLocked(reservation)
 			s.mu.Unlock()
+			if err := safeContextError(ctx); err != nil {
+				return store.PutRevisionResult{}, err
+			}
 			if !bytes.Equal(existing.Artifact(), artifact) {
 				return store.PutRevisionResult{}, engineError(policyengine.ErrorIntegrity)
 			}

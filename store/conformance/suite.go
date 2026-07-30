@@ -47,9 +47,11 @@ type PauseDataCommitHook func() DataCommitPause
 // RevisionCommitPause controls one valid PutRevision call after it owns the
 // namespace revision reservation but before authoritative commit.
 type RevisionCommitPause struct {
-	Entered   <-chan struct{}
-	Contended <-chan struct{}
-	Release   func()
+	Entered      <-chan struct{}
+	Contended    <-chan struct{}
+	WaiterWoke   <-chan struct{}
+	Release      func()
+	ResumeWaiter func()
 }
 
 // PauseRevisionCommitHook pauses the next valid PutRevision commit path.
@@ -136,6 +138,29 @@ func testRevisionProvenanceFirstWriterWins(t *testing.T, fixture Fixture) {
 }
 
 func testConcurrentEquivalentRevisionFirstWriterWins(t *testing.T, fixture Fixture) {
+	type putResult struct {
+		result store.PutRevisionResult
+		err    error
+	}
+	receive := func(name string, values <-chan putResult) putResult {
+		t.Helper()
+		select {
+		case value := <-values:
+			return value
+		case <-time.After(time.Second):
+			t.Fatalf("%s PutRevision() did not return", name)
+			return putResult{}
+		}
+	}
+	waitFor := func(name string, signal <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-signal:
+		case <-time.After(time.Second):
+			t.Fatalf("%s signal was not observed", name)
+		}
+	}
+
 	ctx := context.Background()
 	namespace := "revision-concurrent-provenance"
 	firstSource := []byte("entity user {\n}\n")
@@ -147,48 +172,36 @@ func testConcurrentEquivalentRevisionFirstWriterWins(t *testing.T, fixture Fixtu
 	}
 
 	pause := fixture.PauseNextRevisionCommit()
-	type putResult struct {
-		result store.PutRevisionResult
-		err    error
-	}
 	firstDone := make(chan putResult, 1)
 	go func() {
 		result, err := fixture.Store.PutRevision(ctx, first.write)
 		firstDone <- putResult{result: result, err: err}
 	}()
-	select {
-	case <-pause.Entered:
-	case <-time.After(time.Second):
-		t.Fatal("first PutRevision() did not acquire the revision reservation")
-	}
+	waitFor("owner entered", pause.Entered)
 
 	equivalentDone := make(chan putResult, 1)
 	go func() {
 		result, err := fixture.Store.PutRevision(ctx, equivalent.write)
 		equivalentDone <- putResult{result: result, err: err}
 	}()
-	select {
-	case <-pause.Contended:
-	case <-time.After(time.Second):
-		pause.Release()
-		<-firstDone
-		t.Fatal("equivalent PutRevision() did not contend on the revision reservation")
-	}
+	waitFor("waiter contended", pause.Contended)
 	select {
 	case early := <-equivalentDone:
 		pause.Release()
-		<-firstDone
+		receive("owner", firstDone)
 		t.Fatalf("equivalent PutRevision() returned while first commit was paused: %v", early.err)
 	default:
 	}
 	pause.Release()
 
-	created := <-firstDone
+	created := receive("owner", firstDone)
 	requireNoError(t, created.err)
 	if !created.result.Created() {
 		t.Fatal("reservation owner PutRevision() did not create revision")
 	}
-	reused := <-equivalentDone
+	waitFor("waiter woke", pause.WaiterWoke)
+	pause.ResumeWaiter()
+	reused := receive("equivalent waiter", equivalentDone)
 	requireNoError(t, reused.err)
 	if reused.result.Created() {
 		t.Fatal("concurrent canonical-equivalent PutRevision() created a second revision")
@@ -212,6 +225,147 @@ func testConcurrentEquivalentRevisionFirstWriterWins(t *testing.T, fixture Fixtu
 	requireNoError(t, err)
 	_, err = fixture.Store.PutRevision(ctx, collision)
 	requireCategory(t, err, policyengine.ErrorIntegrity)
+
+	cancelNamespace := "revision-canceled-after-wake"
+	cancelOwner := newRevisionInputWithProvenance(
+		t, cancelNamespace, "owner.cdr", firstSource, 1,
+	)
+	cancelWaiter := newRevisionInputWithProvenance(
+		t, cancelNamespace, "waiter.cdr", equivalentSource, 2,
+	)
+	cancelPause := fixture.PauseNextRevisionCommit()
+	cancelOwnerDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(ctx, cancelOwner.write)
+		cancelOwnerDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("cancel owner entered", cancelPause.Entered)
+	waiterCtx, cancelWaiterContext := context.WithCancel(ctx)
+	cancelWaiterDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(waiterCtx, cancelWaiter.write)
+		cancelWaiterDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("cancel waiter contended", cancelPause.Contended)
+	cancelPause.Release()
+	requireNoError(t, receive("cancel owner", cancelOwnerDone).err)
+	waitFor("cancel waiter woke", cancelPause.WaiterWoke)
+	cancelWaiterContext()
+	cancelPause.ResumeWaiter()
+	requireCategory(
+		t,
+		receive("canceled waiter", cancelWaiterDone).err,
+		policyengine.ErrorCanceled,
+	)
+
+	pausedCancelNamespace := "revision-canceled-while-paused"
+	pausedCancelOwner := newRevisionInputWithProvenance(
+		t, pausedCancelNamespace, "owner.cdr", firstSource, 1,
+	)
+	pausedCancelWaiter := newRevisionInputWithProvenance(
+		t, pausedCancelNamespace, "waiter.cdr", equivalentSource, 2,
+	)
+	pausedCancel := fixture.PauseNextRevisionCommit()
+	pausedCancelOwnerDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(ctx, pausedCancelOwner.write)
+		pausedCancelOwnerDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("paused cancel owner entered", pausedCancel.Entered)
+	pausedWaiterCtx, cancelPausedWaiter := context.WithCancel(ctx)
+	pausedCancelWaiterDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(
+			pausedWaiterCtx,
+			pausedCancelWaiter.write,
+		)
+		pausedCancelWaiterDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("paused cancel waiter contended", pausedCancel.Contended)
+	cancelPausedWaiter()
+	requireCategory(
+		t,
+		receive("waiter canceled while owner paused", pausedCancelWaiterDone).err,
+		policyengine.ErrorCanceled,
+	)
+	pausedCancel.Release()
+	requireNoError(t, receive("paused cancel owner", pausedCancelOwnerDone).err)
+
+	retryCanceledNamespace := "revision-retry-after-owner-cancellation"
+	retryCanceledOwner := newRevisionInputWithProvenance(
+		t, retryCanceledNamespace, "canceled-owner.cdr", firstSource, 1,
+	)
+	retryAfterCancel := newRevisionInputWithProvenance(
+		t, retryCanceledNamespace, "retry-waiter.cdr", equivalentSource, 2,
+	)
+	retryCanceledPause := fixture.PauseNextRevisionCommit()
+	retryCanceledOwnerCtx, cancelRetryOwner := context.WithCancel(ctx)
+	retryCanceledOwnerDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(
+			retryCanceledOwnerCtx,
+			retryCanceledOwner.write,
+		)
+		retryCanceledOwnerDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("canceled owner entered", retryCanceledPause.Entered)
+	retryAfterCancelDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(ctx, retryAfterCancel.write)
+		retryAfterCancelDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("waiter behind canceled owner contended", retryCanceledPause.Contended)
+	cancelRetryOwner()
+	requireCategory(
+		t,
+		receive("canceled owner", retryCanceledOwnerDone).err,
+		policyengine.ErrorCanceled,
+	)
+	waitFor("waiter behind canceled owner woke", retryCanceledPause.WaiterWoke)
+	retryCanceledPause.ResumeWaiter()
+	retriedAfterCancel := receive("waiter after owner cancellation", retryAfterCancelDone)
+	requireNoError(t, retriedAfterCancel.err)
+	if !retriedAfterCancel.result.Created() {
+		t.Fatal("waiter did not create revision after owner cancellation")
+	}
+
+	retryNamespace := "revision-retry-after-owner-failure"
+	retryOwner := newRevisionInputWithProvenance(
+		t, retryNamespace, "failed-owner.cdr", firstSource, 1,
+	)
+	retryWaiter := newRevisionInputWithProvenance(
+		t, retryNamespace, "retry-waiter.cdr", equivalentSource, 2,
+	)
+	fixture.ArmNextEventAppendFailure()
+	retryPause := fixture.PauseNextRevisionCommit()
+	retryOwnerDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(ctx, retryOwner.write)
+		retryOwnerDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("failed owner entered", retryPause.Entered)
+	retryWaiterDone := make(chan putResult, 1)
+	go func() {
+		result, callErr := fixture.Store.PutRevision(ctx, retryWaiter.write)
+		retryWaiterDone <- putResult{result: result, err: callErr}
+	}()
+	waitFor("retry waiter contended", retryPause.Contended)
+	retryPause.Release()
+	requireCategory(
+		t,
+		receive("failed owner", retryOwnerDone).err,
+		policyengine.ErrorUnavailable,
+	)
+	waitFor("retry waiter woke", retryPause.WaiterWoke)
+	retryPause.ResumeWaiter()
+	retried := receive("retry waiter", retryWaiterDone)
+	requireNoError(t, retried.err)
+	if !retried.result.Created() {
+		t.Fatal("waiter did not create revision after owner event failure")
+	}
+	if got, want := retried.result.Record().Provenance().SourceName(), "retry-waiter.cdr"; got != want {
+		t.Fatalf("retried SourceName() = %q, want %q", got, want)
+	}
 }
 
 // CaseNames returns a defensive copy of the stable conformance case manifest.

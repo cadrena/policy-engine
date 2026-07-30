@@ -40,12 +40,16 @@ type referenceModel struct {
 }
 
 type referenceReadPause struct {
-	entered       chan struct{}
-	contended     chan struct{}
-	release       chan struct{}
-	enteredOnce   sync.Once
-	contendedOnce sync.Once
-	releaseOnce   sync.Once
+	entered          chan struct{}
+	contended        chan struct{}
+	waiterWoke       chan struct{}
+	release          chan struct{}
+	resumeWaiter     chan struct{}
+	enteredOnce      sync.Once
+	contendedOnce    sync.Once
+	waiterWokeOnce   sync.Once
+	releaseOnce      sync.Once
+	resumeWaiterOnce sync.Once
 }
 
 type referenceRevisionReservation struct {
@@ -136,18 +140,29 @@ func (m *referenceModel) PutRevision(ctx context.Context, write store.RevisionWr
 		byID := m.revisions[namespace]
 		if existing, ok := byID[write.Metadata().ID()]; ok {
 			m.mu.Unlock()
+			if err := store.ContextError(ctx); err != nil {
+				return store.PutRevisionResult{}, err
+			}
 			if !bytes.Equal(existing.Artifact(), write.Artifact()) {
 				return store.PutRevisionResult{}, referenceError(policyengine.ErrorIntegrity)
 			}
 			return store.NewPutRevisionResult(existing, false)
 		}
 		if wait := m.revisionReservations[namespace]; wait != nil {
+			waitPause := wait.pause
 			if wait.pause != nil {
 				wait.pause.contendedOnce.Do(func() { close(wait.pause.contended) })
 			}
 			m.mu.Unlock()
 			select {
 			case <-wait.done:
+				if waitPause != nil {
+					waitPause.waiterWokeOnce.Do(func() { close(waitPause.waiterWoke) })
+					<-waitPause.resumeWaiter
+				}
+				if err := store.ContextError(ctx); err != nil {
+					return store.PutRevisionResult{}, err
+				}
 				continue
 			case <-ctx.Done():
 				return store.PutRevisionResult{}, store.ContextError(ctx)
@@ -628,15 +643,19 @@ func (m *referenceModel) pauseNextRevisionCommit() conformance.RevisionCommitPau
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	pause := &referenceReadPause{
-		entered:   make(chan struct{}),
-		contended: make(chan struct{}),
-		release:   make(chan struct{}),
+		entered:      make(chan struct{}),
+		contended:    make(chan struct{}),
+		waiterWoke:   make(chan struct{}),
+		release:      make(chan struct{}),
+		resumeWaiter: make(chan struct{}),
 	}
 	m.nextRevisionPause = pause
 	return conformance.RevisionCommitPause{
-		Entered:   pause.entered,
-		Contended: pause.contended,
-		Release:   func() { pause.releaseOnce.Do(func() { close(pause.release) }) },
+		Entered:      pause.entered,
+		Contended:    pause.contended,
+		WaiterWoke:   pause.waiterWoke,
+		Release:      func() { pause.releaseOnce.Do(func() { close(pause.release) }) },
+		ResumeWaiter: func() { pause.resumeWaiterOnce.Do(func() { close(pause.resumeWaiter) }) },
 	}
 }
 

@@ -2237,7 +2237,9 @@ func TestStoreConformance(t *testing.T) {
 			PauseNextRevisionCommit: func() conformance.RevisionCommitPause {
 				pause := adapter.pauseNextRevisionCommit()
 				return conformance.RevisionCommitPause{
-					Entered: pause.entered, Contended: pause.contended, Release: pause.release,
+					Entered: pause.entered, Contended: pause.contended,
+					WaiterWoke: pause.waiterWoke, Release: pause.release,
+					ResumeWaiter: pause.resumeWaiter,
 				}
 			},
 		}
