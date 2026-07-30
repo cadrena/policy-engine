@@ -2,6 +2,7 @@ package conformance_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -12,6 +13,52 @@ import (
 	policyengine "github.com/conductera/policy-engine"
 	"github.com/conductera/policy-engine/store"
 )
+
+func TestRevisionWriteAndRecordPreserveImmutableSourceProvenance(t *testing.T) {
+	t.Parallel()
+
+	original := []byte("entity user {\n}\n")
+	request, err := policyengine.NewPublishRequest("tenant-a", "policy.cdr", original)
+	if err != nil {
+		t.Fatalf("NewPublishRequest() error = %v", err)
+	}
+	provenance, err := store.NewRevisionProvenance(request)
+	if err != nil {
+		t.Fatalf("NewRevisionProvenance() error = %v", err)
+	}
+	artifact := mustArtifactBytes(t, string(original))
+	metadata := mustRevisionMetadata(t, "tenant-a", artifact, time.Unix(1, 0).UTC())
+	write, err := store.NewRevisionWriteWithProvenance(metadata, artifact, provenance)
+	if err != nil {
+		t.Fatalf("NewRevisionWriteWithProvenance() error = %v", err)
+	}
+
+	original[0] = 'X'
+	gotProvenance := write.Provenance()
+	if got, want := gotProvenance.SourceName(), "policy.cdr"; got != want {
+		t.Fatalf("SourceName() = %q, want %q", got, want)
+	}
+	if got, want := gotProvenance.OriginalSource(), []byte("entity user {\n}\n"); !bytes.Equal(got, want) {
+		t.Fatalf("OriginalSource() = %q, want %q", got, want)
+	}
+	if got, want := gotProvenance.OriginalSourceDigest(), sha256.Sum256([]byte("entity user {\n}\n")); got != want {
+		t.Fatalf("OriginalSourceDigest() = %x, want %x", got, want)
+	}
+
+	record, err := store.NewRevisionRecordFromWrite(write)
+	if err != nil {
+		t.Fatalf("NewRevisionRecordFromWrite() error = %v", err)
+	}
+	returned := record.Provenance().OriginalSource()
+	returned[0] = 'X'
+	if got, want := record.Provenance().OriginalSource(), []byte("entity user {\n}\n"); !bytes.Equal(got, want) {
+		t.Fatalf("record OriginalSource() after caller mutation = %q, want %q", got, want)
+	}
+	if got := record.Artifact(); !bytes.Equal(got, artifact) {
+		t.Fatal("record canonical artifact changed while preserving provenance")
+	}
+	assertRedacted(t, provenance, "policy.cdr")
+}
 
 func TestRevisionWriteAndRecordAreImmutableAndPrivacySafe(t *testing.T) {
 	t.Parallel()

@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 
@@ -17,12 +18,63 @@ type RevisionStore interface {
 	ListRevisions(context.Context, policyengine.ListRevisionsRequest) (policyengine.ListRevisionsResponse, error)
 }
 
+// RevisionProvenance preserves the original caller-supplied source and the
+// source name known at the local publication boundary. Its digest is derived
+// from the original source and does not participate in revision identity.
+type RevisionProvenance struct {
+	sourceName           string
+	originalSource       []byte
+	originalSourceDigest [sha256.Size]byte
+	valid                bool
+}
+
+// NewRevisionProvenance copies the source provenance from a validated publish
+// request without inventing caller, repository, or other external claims.
+func NewRevisionProvenance(request policyengine.PublishRequest) (RevisionProvenance, error) {
+	source := request.Source()
+	if _, err := policyengine.NewPublishRequest(request.Namespace(), request.SourceName(), source); err != nil {
+		return RevisionProvenance{}, err
+	}
+	return RevisionProvenance{
+		sourceName:           request.SourceName(),
+		originalSource:       cloneBytes(source),
+		originalSourceDigest: sha256.Sum256(source),
+		valid:                true,
+	}, nil
+}
+
+// SourceName returns the immutable source name known at publication.
+func (p RevisionProvenance) SourceName() string { return p.sourceName }
+
+// OriginalSource returns a defensive copy of the caller-supplied source.
+func (p RevisionProvenance) OriginalSource() []byte { return cloneBytes(p.originalSource) }
+
+// OriginalSourceDigest returns the SHA-256 digest of the original source.
+func (p RevisionProvenance) OriginalSourceDigest() [sha256.Size]byte {
+	return p.originalSourceDigest
+}
+
+// Valid reports whether this provenance was constructed from a valid publish request.
+func (p RevisionProvenance) Valid() bool {
+	if !p.valid || len(p.originalSource) == 0 || sha256.Sum256(p.originalSource) != p.originalSourceDigest {
+		return false
+	}
+	_, err := policyengine.NewPublishRequest("provenance", p.sourceName, p.originalSource)
+	return err == nil
+}
+
+func (p RevisionProvenance) zero() bool {
+	return !p.valid && p.sourceName == "" && len(p.originalSource) == 0 &&
+		p.originalSourceDigest == [sha256.Size]byte{}
+}
+
 // RevisionWrite is an immutable bounded candidate revision. The declared
 // metadata and artifact are intentionally allowed to disagree so an adapter can
 // detect and report a digest collision as INTEGRITY_ERROR without storing data.
 type RevisionWrite struct {
-	metadata policyengine.RevisionMetadata
-	artifact []byte
+	metadata   policyengine.RevisionMetadata
+	artifact   []byte
+	provenance RevisionProvenance
 }
 
 // NewRevisionWrite validates shape and bounds before copying artifact bytes.
@@ -39,23 +91,48 @@ func NewRevisionWrite(metadata policyengine.RevisionMetadata, artifact []byte) (
 	return RevisionWrite{metadata: metadata, artifact: cloneBytes(artifact)}, nil
 }
 
+// NewRevisionWriteWithProvenance validates and copies canonical artifact bytes
+// together with separate original-source provenance.
+func NewRevisionWriteWithProvenance(
+	metadata policyengine.RevisionMetadata,
+	artifact []byte,
+	provenance RevisionProvenance,
+) (RevisionWrite, error) {
+	write, err := NewRevisionWrite(metadata, artifact)
+	if err != nil {
+		return RevisionWrite{}, err
+	}
+	if !provenance.Valid() {
+		return RevisionWrite{}, newError(policyengine.ErrorInvalidArgument)
+	}
+	write.provenance = cloneRevisionProvenance(provenance)
+	return write, nil
+}
+
 // Metadata returns the candidate's immutable public metadata.
 func (w RevisionWrite) Metadata() policyengine.RevisionMetadata { return w.metadata }
 
 // Artifact returns a defensive copy of the encoded DSL artifact.
 func (w RevisionWrite) Artifact() []byte { return cloneBytes(w.artifact) }
 
+// Provenance returns immutable original-source provenance when supplied.
+func (w RevisionWrite) Provenance() RevisionProvenance {
+	return cloneRevisionProvenance(w.provenance)
+}
+
 // Valid reports whether the candidate has valid bounded shape. It does not
 // assert that the declared content address matches the bytes.
 func (w RevisionWrite) Valid() bool {
 	return validateRevisionMetadata(w.metadata) == nil && len(w.artifact) > 0 &&
-		len(w.artifact) <= policyengine.MaxPolicyArtifactBytes
+		len(w.artifact) <= policyengine.MaxPolicyArtifactBytes &&
+		(w.provenance.zero() || w.provenance.Valid())
 }
 
 // RevisionRecord is an immutable verified content-addressed local revision.
 type RevisionRecord struct {
-	metadata policyengine.RevisionMetadata
-	artifact []byte
+	metadata   policyengine.RevisionMetadata
+	artifact   []byte
+	provenance RevisionProvenance
 }
 
 // NewRevisionRecord validates the DSL artifact and its declared content address
@@ -65,10 +142,23 @@ func NewRevisionRecord(metadata policyengine.RevisionMetadata, artifact []byte) 
 	if err != nil {
 		return RevisionRecord{}, err
 	}
+	return NewRevisionRecordFromWrite(write)
+}
+
+// NewRevisionRecordFromWrite verifies canonical content and preserves any
+// separately supplied immutable source provenance.
+func NewRevisionRecordFromWrite(write RevisionWrite) (RevisionRecord, error) {
+	if !write.Valid() {
+		return RevisionRecord{}, newError(policyengine.ErrorInvalidArgument)
+	}
 	if err := verifyRevisionContent(write); err != nil {
 		return RevisionRecord{}, err
 	}
-	return RevisionRecord{metadata: metadata, artifact: cloneBytes(artifact)}, nil
+	return RevisionRecord{
+		metadata:   write.metadata,
+		artifact:   cloneBytes(write.artifact),
+		provenance: cloneRevisionProvenance(write.provenance),
+	}, nil
 }
 
 // Metadata returns immutable public revision metadata.
@@ -76,6 +166,11 @@ func (r RevisionRecord) Metadata() policyengine.RevisionMetadata { return r.meta
 
 // Artifact returns a defensive copy of the encoded DSL artifact.
 func (r RevisionRecord) Artifact() []byte { return cloneBytes(r.artifact) }
+
+// Provenance returns immutable original-source provenance when supplied.
+func (r RevisionRecord) Provenance() RevisionProvenance {
+	return cloneRevisionProvenance(r.provenance)
+}
 
 // Valid reports whether metadata, artifact, and content address are valid.
 func (r RevisionRecord) Valid() bool {
@@ -145,6 +240,11 @@ func cloneBytes(value []byte) []byte {
 	return append([]byte(nil), value...)
 }
 
+func cloneRevisionProvenance(value RevisionProvenance) RevisionProvenance {
+	value.originalSource = cloneBytes(value.originalSource)
+	return value
+}
+
 func redactedString(typeName string) string { return typeName + "{redacted}" }
 
 func writeRedacted(state fmt.State, typeName string) {
@@ -185,3 +285,17 @@ func (PutRevisionResult) Format(s fmt.State, _ rune) { writeRedacted(s, "PutRevi
 
 // LogValue returns privacy-safe structured logging metadata.
 func (PutRevisionResult) LogValue() slog.Value { return redactedLogValue("PutRevisionResult") }
+func (RevisionProvenance) String() string      { return redactedString("RevisionProvenance") }
+
+// GoString returns a redacted Go-syntax representation.
+func (RevisionProvenance) GoString() string { return redactedString("RevisionProvenance") }
+
+// Format writes a redacted representation for every formatting verb.
+func (RevisionProvenance) Format(s fmt.State, _ rune) {
+	writeRedacted(s, "RevisionProvenance")
+}
+
+// LogValue returns privacy-safe structured logging metadata.
+func (RevisionProvenance) LogValue() slog.Value {
+	return redactedLogValue("RevisionProvenance")
+}

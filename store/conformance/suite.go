@@ -70,6 +70,7 @@ type testCase struct {
 var cases = [...]testCase{
 	{name: "contexts-and-forged-values", run: testContextsAndForgedValues},
 	{name: "immutable-revisions-and-pagination", run: testImmutableRevisionsAndPagination},
+	{name: "revision-provenance-first-writer-wins", run: testRevisionProvenanceFirstWriterWins},
 	{name: "slot-cas-history-and-race", run: testSlotCASHistoryAndRace},
 	{name: "atomic-data-generations-and-snapshots", run: testAtomicDataGenerationsAndSnapshots},
 	{name: "minimum-generation-cancellation", run: testMinimumGenerationCancellation},
@@ -82,6 +83,43 @@ var cases = [...]testCase{
 	{name: "event-atomicity-order-and-expiry", run: testEventAtomicityOrderAndExpiry},
 	{name: "commit-order-not-call-start-order", run: testCommitOrderNotCallStartOrder},
 	{name: "independent-slot-data-domains", run: testIndependentSlotDataDomains},
+}
+
+func testRevisionProvenanceFirstWriterWins(t *testing.T, fixture Fixture) {
+	ctx := context.Background()
+	namespace := "revision-provenance"
+	firstSource := []byte("entity user {\n}\n")
+	equivalentSource := []byte("entity user {}")
+	first := newRevisionInputWithProvenance(t, namespace, "first.cdr", firstSource, 1)
+	equivalent := newRevisionInputWithProvenance(t, namespace, "equivalent.cdr", equivalentSource, 2)
+	if !bytes.Equal(first.write.Artifact(), equivalent.write.Artifact()) {
+		t.Fatal("test sources did not produce canonical-equivalent artifacts")
+	}
+
+	created, err := fixture.Store.PutRevision(ctx, first.write)
+	requireNoError(t, err)
+	if !created.Created() {
+		t.Fatal("first PutRevision() did not create revision")
+	}
+	reused, err := fixture.Store.PutRevision(ctx, equivalent.write)
+	requireNoError(t, err)
+	if reused.Created() {
+		t.Fatal("canonical-equivalent PutRevision() created a second revision")
+	}
+
+	request, err := policyengine.NewGetRevisionRequest(namespace, first.write.Metadata().ID())
+	requireNoError(t, err)
+	stored, err := fixture.Store.GetRevision(ctx, request)
+	requireNoError(t, err)
+	if got, want := stored.Provenance().SourceName(), "first.cdr"; got != want {
+		t.Fatalf("stored SourceName() = %q, want first-writer %q", got, want)
+	}
+	if got := stored.Provenance().OriginalSource(); !bytes.Equal(got, firstSource) {
+		t.Fatalf("stored OriginalSource() = %q, want first-writer %q", got, firstSource)
+	}
+	if got, want := reused.Record().Provenance().OriginalSourceDigest(), first.write.Provenance().OriginalSourceDigest(); got != want {
+		t.Fatalf("reused provenance digest = %x, want first-writer %x", got, want)
+	}
 }
 
 // CaseNames returns a defensive copy of the stable conformance case manifest.
@@ -1343,6 +1381,31 @@ func newRevisionInput(t testing.TB, namespace, source string, publishedSecond in
 	encoded := artifactBytes(t, source)
 	metadata := mustMetadata(t, namespace, encoded, time.Unix(publishedSecond, 0).UTC())
 	write, err := store.NewRevisionWrite(metadata, encoded)
+	requireNoError(t, err)
+	return revisionInput{write: write}
+}
+
+func newRevisionInputWithProvenance(
+	t testing.TB,
+	namespace string,
+	sourceName string,
+	source []byte,
+	publishedSecond int64,
+) revisionInput {
+	t.Helper()
+	artifact, err := dsl.CompileArtifact(sourceName, source)
+	requireNoError(t, err)
+	encoded, err := artifact.MarshalBinary()
+	requireNoError(t, err)
+	id, err := policyengine.RevisionIDFromArtifact(artifact)
+	requireNoError(t, err)
+	metadata, err := policyengine.NewRevisionMetadata(namespace, id, time.Unix(publishedSecond, 0).UTC())
+	requireNoError(t, err)
+	request, err := policyengine.NewPublishRequest(namespace, sourceName, source)
+	requireNoError(t, err)
+	provenance, err := store.NewRevisionProvenance(request)
+	requireNoError(t, err)
+	write, err := store.NewRevisionWriteWithProvenance(metadata, encoded, provenance)
 	requireNoError(t, err)
 	return revisionInput{write: write}
 }

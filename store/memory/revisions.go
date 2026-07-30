@@ -18,7 +18,7 @@ func (s *Store) PutRevision(ctx context.Context, write store.RevisionWrite) (sto
 	}
 	metadata := write.Metadata()
 	artifact := write.Artifact()
-	record, err := store.NewRevisionRecord(metadata, artifact)
+	record, err := store.NewRevisionRecordFromWrite(write)
 	if err != nil {
 		return store.PutRevisionResult{}, err
 	}

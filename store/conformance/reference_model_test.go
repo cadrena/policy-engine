@@ -113,7 +113,7 @@ func (m *referenceModel) PutRevision(ctx context.Context, write store.RevisionWr
 	if !write.Valid() {
 		return store.PutRevisionResult{}, referenceError(policyengine.ErrorInvalidArgument)
 	}
-	record, err := store.NewRevisionRecord(write.Metadata(), write.Artifact())
+	record, err := store.NewRevisionRecordFromWrite(write)
 	if err != nil {
 		return store.PutRevisionResult{}, err
 	}
