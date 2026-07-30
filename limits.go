@@ -1,6 +1,6 @@
 package policyengine
 
-import "github.com/conductera/dsl"
+import "github.com/cadrena/dsl"
 
 // Stable public V1 hard maxima. Per-request or deployment configuration may
 // lower these values but must never raise them.

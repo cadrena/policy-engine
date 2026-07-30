@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/conductera/dsl"
-	policyengine "github.com/conductera/policy-engine"
-	"github.com/conductera/policy-engine/internal/app"
-	artifactloader "github.com/conductera/policy-engine/internal/artifact"
-	storecontract "github.com/conductera/policy-engine/store"
-	"github.com/conductera/policy-engine/store/memory"
+	"github.com/cadrena/dsl"
+	policyengine "github.com/cadrena/policy-engine"
+	"github.com/cadrena/policy-engine/internal/app"
+	artifactloader "github.com/cadrena/policy-engine/internal/artifact"
+	storecontract "github.com/cadrena/policy-engine/store"
+	"github.com/cadrena/policy-engine/store/memory"
 )
 
 func TestPublishClockPanicFailsClosedWithoutStorage(t *testing.T) {

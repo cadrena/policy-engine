@@ -5,7 +5,7 @@ import (
 	"math"
 	"sort"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 // Activate performs an ABA-safe slot CAS and atomically appends history and an event.

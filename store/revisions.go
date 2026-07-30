@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/conductera/dsl"
-	policyengine "github.com/conductera/policy-engine"
+	"github.com/cadrena/dsl"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 // RevisionStore persists immutable content-addressed local DSL artifacts.

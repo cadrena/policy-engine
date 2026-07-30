@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterable, Iterator, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-_PRIVATE_MODULE = ("github.com/conductera/" + "control-plane").encode("ascii")
+_PRIVATE_MODULE = ("github.com/cadrena/" + "control-plane").encode("ascii")
 _PRIVATE_TLDS = {"internal", "corp", "local"}
 _PRIVATE_PRODUCTS = {"nexus", "artifactory"}
 _URL_RE = re.compile(r"(?i)\b(?:https?|ssh|git)://[^\s<>\"']+")

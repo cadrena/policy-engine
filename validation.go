@@ -6,7 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/conductera/dsl"
+	"github.com/cadrena/dsl"
 )
 
 func validateText(value string, maximum int, allowEmpty bool) error {

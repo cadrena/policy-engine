@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/conductera/policy-engine/store/conformance"
+	"github.com/cadrena/policy-engine/store/conformance"
 )
 
 func TestConformanceCaseManifestIsStableUniqueAndDefensive(t *testing.T) {

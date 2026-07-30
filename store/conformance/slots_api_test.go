@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	policyengine "github.com/conductera/policy-engine"
-	"github.com/conductera/policy-engine/store"
+	policyengine "github.com/cadrena/policy-engine"
+	"github.com/cadrena/policy-engine/store"
 )
 
 func TestStoreContractComposesRevisionAndSlotCapabilities(t *testing.T) {

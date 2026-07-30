@@ -115,7 +115,7 @@ artifact contents, identifiers, credentials, or component secrets.
 ## 6. Artifact and policy security
 
 Durable policy revisions use only the deterministic, versioned Artifact API
-from a tagged `github.com/conductera/dsl` release. Public revisions MUST NOT
+from a tagged `github.com/cadrena/dsl` release. Public revisions MUST NOT
 contain gob data, serialized Go objects, closures, function pointers, plugins,
 user code, network functions, or executable implementation objects.
 

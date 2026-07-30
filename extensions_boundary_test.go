@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 var testTime = time.Date(2026, time.July, 29, 12, 0, 0, 0, time.UTC)

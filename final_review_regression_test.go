@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 type blockingAsError struct {

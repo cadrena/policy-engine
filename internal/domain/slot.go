@@ -1,6 +1,6 @@
 package domain
 
-import policyengine "github.com/conductera/policy-engine"
+import policyengine "github.com/cadrena/policy-engine"
 
 // Slot is one validated namespace-scoped local slot lookup.
 type Slot struct {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 func TestCategoryCheckRequiresDirectSanitizedEngineError(t *testing.T) {

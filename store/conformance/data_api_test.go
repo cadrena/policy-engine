@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/conductera/dsl"
-	policyengine "github.com/conductera/policy-engine"
-	"github.com/conductera/policy-engine/store"
+	"github.com/cadrena/dsl"
+	policyengine "github.com/cadrena/policy-engine"
+	"github.com/cadrena/policy-engine/store"
 )
 
 func TestSnapshotValueConstructorsRejectForgedAndOverBudgetState(t *testing.T) {

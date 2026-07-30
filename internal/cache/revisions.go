@@ -7,7 +7,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/conductera/dsl"
+	"github.com/cadrena/dsl"
 )
 
 var (

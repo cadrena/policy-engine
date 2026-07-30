@@ -5,8 +5,8 @@ import (
 	"context"
 	"math"
 
-	policyengine "github.com/conductera/policy-engine"
-	"github.com/conductera/policy-engine/store"
+	policyengine "github.com/cadrena/policy-engine"
+	"github.com/cadrena/policy-engine/store"
 )
 
 // WriteData atomically commits structurally-shared tuple and attribute indexes,

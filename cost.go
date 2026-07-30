@@ -1,6 +1,6 @@
 package policyengine
 
-import "github.com/conductera/dsl"
+import "github.com/cadrena/dsl"
 
 const (
 	// Aggregate costs count exact dynamic bytes plus deterministic conservative

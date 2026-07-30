@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/conductera/dsl"
+	"github.com/cadrena/dsl"
 )
 
 func TestRevisionCacheKeyUsesExactNamespaceRevisionAndEvaluatorABI(t *testing.T) {

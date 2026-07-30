@@ -14,7 +14,7 @@ package store
 import (
 	"context"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 // Store composes the local storage capabilities required by the runtime.

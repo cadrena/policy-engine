@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 // SlotStore provides optional local ABA-safe slot selection. Implementations

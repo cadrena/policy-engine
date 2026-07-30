@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	policyengine "github.com/conductera/policy-engine"
-	"github.com/conductera/policy-engine/store"
+	policyengine "github.com/cadrena/policy-engine"
+	"github.com/cadrena/policy-engine/store"
 )
 
 func TestStoreContractComposesEventListing(t *testing.T) {

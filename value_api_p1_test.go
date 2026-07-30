@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 func mustStringValue(t testing.TB, input string) policyengine.Value {

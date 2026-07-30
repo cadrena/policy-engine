@@ -6,10 +6,10 @@ import (
 	"reflect"
 	"time"
 
-	policyengine "github.com/conductera/policy-engine"
-	artifactloader "github.com/conductera/policy-engine/internal/artifact"
-	"github.com/conductera/policy-engine/internal/domain"
-	"github.com/conductera/policy-engine/store"
+	policyengine "github.com/cadrena/policy-engine"
+	artifactloader "github.com/cadrena/policy-engine/internal/artifact"
+	"github.com/cadrena/policy-engine/internal/domain"
+	"github.com/cadrena/policy-engine/store"
 )
 
 // Clock supplies local immutable revision publication timestamps.

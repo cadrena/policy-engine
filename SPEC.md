@@ -49,11 +49,11 @@ Package `policyengine` MUST live at the module root. Public consumers MUST
 import it as follows:
 
 ```go
-import policyengine "github.com/conductera/policy-engine"
+import policyengine "github.com/cadrena/policy-engine"
 ```
 
 The engine MUST consume the Artifact API from a tagged
-`github.com/conductera/dsl` release. The DSL owns parsing, canonicalization,
+`github.com/cadrena/dsl` release. The DSL owns parsing, canonicalization,
 deterministic artifact encoding, compilation semantics, and graph and guard
 evaluation semantics. The engine owns local lifecycle, authorization-data
 orchestration, capability enforcement, storage, caching, transport mapping, and

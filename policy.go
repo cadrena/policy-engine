@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/conductera/dsl"
+	"github.com/cadrena/dsl"
 )
 
 // Selector identifies exactly one policy slot or immutable revision.

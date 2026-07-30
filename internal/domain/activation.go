@@ -1,6 +1,6 @@
 package domain
 
-import policyengine "github.com/conductera/policy-engine"
+import policyengine "github.com/cadrena/policy-engine"
 
 // Activation is one validated local ABA-safe slot mutation.
 type Activation struct {

@@ -2,7 +2,7 @@
 // public Conductera DSL artifact API.
 package artifact
 
-import "github.com/conductera/dsl"
+import "github.com/cadrena/dsl"
 
 // Loader compiles local source and decodes stored canonical DSL artifacts.
 type Loader struct{}

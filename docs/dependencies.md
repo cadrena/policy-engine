@@ -2,7 +2,7 @@
 
 ## Conductera DSL
 
-The policy engine pins the public module `github.com/conductera/dsl` at tag
+The policy engine pins the public module `github.com/cadrena/dsl` at tag
 `v1.0.0`. That tag resolves to commit
 `54080d9aa503812645058d507631a9c04fb7ab2e` through normal public Go module
 resolution without credentials.
@@ -10,8 +10,8 @@ resolution without credentials.
 The dependency direction is strictly one way:
 
 ```text
-github.com/conductera/dsl -> does not import the policy engine
-github.com/conductera/policy-engine -> imports tagged public DSL APIs
+github.com/cadrena/dsl -> does not import the policy engine
+github.com/cadrena/policy-engine -> imports tagged public DSL APIs
 commercial products -> may import tagged public DSL and policy-engine APIs
 ```
 

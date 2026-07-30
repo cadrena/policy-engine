@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/conductera/dsl"
-	policyengine "github.com/conductera/policy-engine"
+	"github.com/cadrena/dsl"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 func distinctRevisionIDs(t *testing.T) (string, string) {

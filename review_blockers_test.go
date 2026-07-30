@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/conductera/dsl"
-	policyengine "github.com/conductera/policy-engine"
+	"github.com/cadrena/dsl"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 func TestTask5RevisionIdentityAndPolicyReadAreMetadataOnly(t *testing.T) {

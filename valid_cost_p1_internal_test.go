@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/conductera/dsl"
+	"github.com/cadrena/dsl"
 )
 
 func requireCostResourceExhausted(t *testing.T, err error) {

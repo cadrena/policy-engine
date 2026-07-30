@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	policyengine "github.com/conductera/policy-engine"
+	policyengine "github.com/cadrena/policy-engine"
 )
 
 type optionAuthorizer struct{}

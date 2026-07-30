@@ -27,7 +27,7 @@ spec.loader.exec_module(checker)
 
 
 def _private_module() -> str:
-    return "github.com/conductera/" + "control-plane"
+    return "github.com/cadrena/" + "control-plane"
 
 
 def _private_url(host: str, suffix: str = "/") -> str:

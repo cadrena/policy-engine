@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 
-	policyengine "github.com/conductera/policy-engine"
-	"github.com/conductera/policy-engine/internal/domain"
+	policyengine "github.com/cadrena/policy-engine"
+	"github.com/cadrena/policy-engine/internal/domain"
 )
 
 // Activate performs one authorized namespace-local ABA-safe slot CAS.

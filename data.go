@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/conductera/dsl"
+	"github.com/cadrena/dsl"
 )
 
 // ValueKind identifies one non-coercing authorization attribute value type.

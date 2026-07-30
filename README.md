@@ -36,7 +36,7 @@ system, fleet manager, or enterprise audit platform.
 Consumers import the package from the module root:
 
 ```go
-import policyengine "github.com/conductera/policy-engine"
+import policyengine "github.com/cadrena/policy-engine"
 ```
 
 > The embedded package is located at the module root. Do not import a redundant
@@ -54,7 +54,7 @@ The canonical URL becomes reachable when the pre-V1 public DSL is published.
 -->
 
 Policies are authored in the Conductera textual DSL provided by tagged releases
-of [`github.com/conductera/dsl`](https://github.com/conductera/dsl). V1 does not
+of [`github.com/cadrena/dsl`](https://github.com/cadrena/dsl). V1 does not
 execute CEL, Rego, JavaScript, Go plugins, WASM, or network-backed policy
 functions.
 

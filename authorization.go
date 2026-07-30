@@ -3,7 +3,7 @@ package policyengine
 import (
 	"time"
 
-	"github.com/conductera/dsl"
+	"github.com/cadrena/dsl"
 )
 
 // Decision is a successful public policy outcome, never an engine error.
