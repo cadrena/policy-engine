@@ -52,10 +52,11 @@ type Store struct {
 	cursorKey     [32]byte
 	cursorKeyOK   bool
 
-	failNextEvent bool
-	blockNextRead bool
-	nextReadPause *pauseState
-	nextDataPause *pauseState
+	failNextEvent     bool
+	blockNextRead     bool
+	nextReadPause     *pauseState
+	nextDataPause     *pauseState
+	nextRevisionPause *pauseState
 }
 
 // New constructs an isolated store using the system clock.
@@ -159,10 +160,12 @@ type cursorState struct {
 }
 
 type pauseState struct {
-	entered     chan struct{}
-	release     chan struct{}
-	enteredOnce sync.Once
-	releaseOnce sync.Once
+	entered       chan struct{}
+	contended     chan struct{}
+	release       chan struct{}
+	enteredOnce   sync.Once
+	contendedOnce sync.Once
+	releaseOnce   sync.Once
 }
 
 type commitReservation struct {
@@ -171,6 +174,7 @@ type commitReservation struct {
 	operation      string
 	idempotencyKey string
 	fingerprint    []byte
+	revisionPause  *pauseState
 }
 
 type commitReservationKey struct {
@@ -310,7 +314,11 @@ func (s *Store) consumeSnapshotReadBlock() bool {
 func (s *Store) newPause(target **pauseState) *pauseState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pause := &pauseState{entered: make(chan struct{}), release: make(chan struct{})}
+	pause := &pauseState{
+		entered:   make(chan struct{}),
+		contended: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
 	*target = pause
 	return pause
 }

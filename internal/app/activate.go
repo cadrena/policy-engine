@@ -27,7 +27,21 @@ func (s *PolicyService) Activate(
 	); err != nil {
 		return policyengine.ActivateResponse{}, err
 	}
-	return s.store.Activate(ctx, validated)
+	response, err := s.store.Activate(ctx, validated)
+	if err != nil {
+		return policyengine.ActivateResponse{}, err
+	}
+	storedActivation := response.Activation()
+	if storedActivation.Namespace() != validated.Namespace() ||
+		storedActivation.Slot() != validated.Slot() ||
+		storedActivation.RevisionID() != validated.TargetRevisionID() {
+		return policyengine.ActivateResponse{}, appError(policyengine.ErrorIntegrity)
+	}
+	bound, err := policyengine.NewActivateResponse(storedActivation)
+	if err != nil {
+		return policyengine.ActivateResponse{}, appError(policyengine.ErrorIntegrity)
+	}
+	return bound, nil
 }
 
 // Resolve returns one authorized namespace-local slot pin.
@@ -50,7 +64,20 @@ func (s *PolicyService) Resolve(
 	); err != nil {
 		return policyengine.ResolveResponse{}, err
 	}
-	return s.store.Resolve(ctx, validated)
+	response, err := s.store.Resolve(ctx, validated)
+	if err != nil {
+		return policyengine.ResolveResponse{}, err
+	}
+	activation := response.Activation()
+	if activation.Namespace() != validated.Namespace() ||
+		activation.Slot() != validated.Slot() {
+		return policyengine.ResolveResponse{}, appError(policyengine.ErrorIntegrity)
+	}
+	bound, err := policyengine.NewResolveResponse(activation)
+	if err != nil {
+		return policyengine.ResolveResponse{}, appError(policyengine.ErrorIntegrity)
+	}
+	return bound, nil
 }
 
 // ListActivationHistory returns retained authorized local slot history.
@@ -72,5 +99,17 @@ func (s *PolicyService) ListActivationHistory(
 	); err != nil {
 		return policyengine.ListActivationHistoryResponse{}, err
 	}
-	return s.store.ListActivationHistory(ctx, validated)
+	response, err := s.store.ListActivationHistory(ctx, validated)
+	if err != nil {
+		return policyengine.ListActivationHistoryResponse{}, err
+	}
+	bound, err := policyengine.NewListActivationHistoryResponse(
+		validated,
+		response.Activations(),
+		response.NextCursor(),
+	)
+	if err != nil {
+		return policyengine.ListActivationHistoryResponse{}, appError(policyengine.ErrorIntegrity)
+	}
+	return bound, nil
 }

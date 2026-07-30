@@ -24,24 +24,33 @@ const referenceHistoryRetention = 3
 type referenceModel struct {
 	mu sync.Mutex
 
-	revisions map[string]map[string]store.RevisionRecord
-	slots     map[string]map[string]*referenceSlot
-	data      map[string]*referenceData
-	events    map[string]*referenceEvents
-	cursors   map[string]referenceCursor
-	cursorSeq uint64
+	revisions            map[string]map[string]store.RevisionRecord
+	revisionReservations map[string]*referenceRevisionReservation
+	slots                map[string]map[string]*referenceSlot
+	data                 map[string]*referenceData
+	events               map[string]*referenceEvents
+	cursors              map[string]referenceCursor
+	cursorSeq            uint64
 
-	failNextEvent bool
-	blockNextRead bool
-	nextReadPause *referenceReadPause
-	nextDataPause *referenceReadPause
+	failNextEvent     bool
+	blockNextRead     bool
+	nextReadPause     *referenceReadPause
+	nextDataPause     *referenceReadPause
+	nextRevisionPause *referenceReadPause
 }
 
 type referenceReadPause struct {
-	entered     chan struct{}
-	release     chan struct{}
-	enteredOnce sync.Once
-	releaseOnce sync.Once
+	entered       chan struct{}
+	contended     chan struct{}
+	release       chan struct{}
+	enteredOnce   sync.Once
+	contendedOnce sync.Once
+	releaseOnce   sync.Once
+}
+
+type referenceRevisionReservation struct {
+	done  chan struct{}
+	pause *referenceReadPause
 }
 
 type referenceSlot struct {
@@ -89,11 +98,12 @@ var _ store.Snapshot = (*referenceSnapshot)(nil)
 
 func newReferenceFixture(testing.TB) conformance.Fixture {
 	model := &referenceModel{
-		revisions: make(map[string]map[string]store.RevisionRecord),
-		slots:     make(map[string]map[string]*referenceSlot),
-		data:      make(map[string]*referenceData),
-		events:    make(map[string]*referenceEvents),
-		cursors:   make(map[string]referenceCursor),
+		revisions:            make(map[string]map[string]store.RevisionRecord),
+		revisionReservations: make(map[string]*referenceRevisionReservation),
+		slots:                make(map[string]map[string]*referenceSlot),
+		data:                 make(map[string]*referenceData),
+		events:               make(map[string]*referenceEvents),
+		cursors:              make(map[string]referenceCursor),
 	}
 	return conformance.Fixture{
 		Store:                      model,
@@ -102,6 +112,7 @@ func newReferenceFixture(testing.TB) conformance.Fixture {
 		ArmNextSnapshotReadBlock:   model.armNextSnapshotReadBlock,
 		PauseNextSnapshotRead:      model.pauseNextSnapshotRead,
 		PauseNextDataCommit:        model.pauseNextDataCommit,
+		PauseNextRevisionCommit:    model.pauseNextRevisionCommit,
 		ExpireEvents:               model.expireEvents,
 	}
 }
@@ -117,18 +128,70 @@ func (m *referenceModel) PutRevision(ctx context.Context, write store.RevisionWr
 	if err != nil {
 		return store.PutRevisionResult{}, err
 	}
+	namespace := write.Metadata().Namespace()
+	var reservation *referenceRevisionReservation
+	var pause *referenceReadPause
+	for {
+		m.mu.Lock()
+		byID := m.revisions[namespace]
+		if existing, ok := byID[write.Metadata().ID()]; ok {
+			m.mu.Unlock()
+			if !bytes.Equal(existing.Artifact(), write.Artifact()) {
+				return store.PutRevisionResult{}, referenceError(policyengine.ErrorIntegrity)
+			}
+			return store.NewPutRevisionResult(existing, false)
+		}
+		if wait := m.revisionReservations[namespace]; wait != nil {
+			if wait.pause != nil {
+				wait.pause.contendedOnce.Do(func() { close(wait.pause.contended) })
+			}
+			m.mu.Unlock()
+			select {
+			case <-wait.done:
+				continue
+			case <-ctx.Done():
+				return store.PutRevisionResult{}, store.ContextError(ctx)
+			}
+		}
+		pause = m.nextRevisionPause
+		m.nextRevisionPause = nil
+		reservation = &referenceRevisionReservation{
+			done:  make(chan struct{}),
+			pause: pause,
+		}
+		m.revisionReservations[namespace] = reservation
+		m.mu.Unlock()
+		break
+	}
+	releaseReservationLocked := func() {
+		if m.revisionReservations[namespace] == reservation {
+			delete(m.revisionReservations, namespace)
+			close(reservation.done)
+		}
+	}
+	if pause != nil {
+		pause.enteredOnce.Do(func() { close(pause.entered) })
+		select {
+		case <-pause.release:
+		case <-ctx.Done():
+			m.mu.Lock()
+			releaseReservationLocked()
+			m.mu.Unlock()
+			return store.PutRevisionResult{}, store.ContextError(ctx)
+		}
+	}
+	if err := store.ContextError(ctx); err != nil {
+		m.mu.Lock()
+		releaseReservationLocked()
+		m.mu.Unlock()
+		return store.PutRevisionResult{}, err
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	namespace := write.Metadata().Namespace()
 	byID := m.revisions[namespace]
-	if existing, ok := byID[write.Metadata().ID()]; ok {
-		if !bytes.Equal(existing.Artifact(), write.Artifact()) {
-			return store.PutRevisionResult{}, referenceError(policyengine.ErrorIntegrity)
-		}
-		return store.NewPutRevisionResult(existing, false)
-	}
 	if m.consumeEventFailureLocked() {
+		releaseReservationLocked()
 		return store.PutRevisionResult{}, referenceError(policyengine.ErrorUnavailable)
 	}
 	event, err := m.newEventLocked(policyengine.StateEventInput{
@@ -137,10 +200,12 @@ func (m *referenceModel) PutRevision(ctx context.Context, write store.RevisionWr
 		RevisionID: record.Metadata().ID(),
 	})
 	if err != nil {
+		releaseReservationLocked()
 		return store.PutRevisionResult{}, err
 	}
 	result, err := store.NewPutRevisionResult(record, true)
 	if err != nil {
+		releaseReservationLocked()
 		return store.PutRevisionResult{}, err
 	}
 	if byID == nil {
@@ -149,6 +214,7 @@ func (m *referenceModel) PutRevision(ctx context.Context, write store.RevisionWr
 	}
 	byID[record.Metadata().ID()] = record
 	m.appendEventLocked(event)
+	releaseReservationLocked()
 	return result, nil
 }
 
@@ -519,7 +585,11 @@ func (m *referenceModel) armNextSnapshotReadBlock() {
 func (m *referenceModel) pauseNextSnapshotRead() conformance.SnapshotReadPause {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pause := &referenceReadPause{entered: make(chan struct{}), release: make(chan struct{})}
+	pause := &referenceReadPause{
+		entered:   make(chan struct{}),
+		contended: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
 	m.nextReadPause = pause
 	return conformance.SnapshotReadPause{
 		Entered: pause.entered,
@@ -552,6 +622,22 @@ func (m *referenceModel) consumeDataCommitPause() *referenceReadPause {
 	pause := m.nextDataPause
 	m.nextDataPause = nil
 	return pause
+}
+
+func (m *referenceModel) pauseNextRevisionCommit() conformance.RevisionCommitPause {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pause := &referenceReadPause{
+		entered:   make(chan struct{}),
+		contended: make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	m.nextRevisionPause = pause
+	return conformance.RevisionCommitPause{
+		Entered:   pause.entered,
+		Contended: pause.contended,
+		Release:   func() { pause.releaseOnce.Do(func() { close(pause.release) }) },
+	}
 }
 
 func (m *referenceModel) consumeSnapshotReadBlock() bool {

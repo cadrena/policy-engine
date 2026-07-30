@@ -825,7 +825,9 @@ func TestClockReentrantSameNamespaceMutationsReturnPromptlyWithoutWedge(t *testi
 		}
 		write := revisionWrite(t, "mutation-reentry-put", "entity document {}")
 		clock.callback = func() error {
-			_, callErr := adapter.PutRevision(context.Background(), write)
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+			defer cancel()
+			_, callErr := adapter.PutRevision(ctx, write)
 			return callErr
 		}
 		done := make(chan error, 1)
@@ -841,8 +843,8 @@ func TestClockReentrantSameNamespaceMutationsReturnPromptlyWithoutWedge(t *testi
 		case <-time.After(time.Second):
 			t.Fatal("PutRevision deadlocked when Clock.Now reentered PutRevision")
 		}
-		if category := errorCategory(clock.result()); category != policyengine.ErrorUnavailable {
-			t.Fatalf("reentrant PutRevision error = %v, want UNAVAILABLE", clock.result())
+		if category := errorCategory(clock.result()); category != policyengine.ErrorDeadlineExceeded {
+			t.Fatalf("reentrant PutRevision error = %v, want DEADLINE_EXCEEDED", clock.result())
 		}
 		get, _ := policyengine.NewGetRevisionRequest("mutation-reentry-put", write.Metadata().ID())
 		if _, err := adapter.GetRevision(context.Background(), get); err != nil {
@@ -2231,6 +2233,12 @@ func TestStoreConformance(t *testing.T) {
 			PauseNextDataCommit: func() conformance.DataCommitPause {
 				pause := adapter.pauseNextDataCommit()
 				return conformance.DataCommitPause{Entered: pause.entered, Release: pause.release}
+			},
+			PauseNextRevisionCommit: func() conformance.RevisionCommitPause {
+				pause := adapter.pauseNextRevisionCommit()
+				return conformance.RevisionCommitPause{
+					Entered: pause.entered, Contended: pause.contended, Release: pause.release,
+				}
 			},
 		}
 	})

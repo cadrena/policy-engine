@@ -227,6 +227,133 @@ func TestPublishRejectsCanonicalArtifactMismatchWithoutActivating(t *testing.T) 
 	requireCategory(t, err, policyengine.ErrorNotFound)
 }
 
+func TestPublishRejectsAuthoritativeResultsWithInvalidCreationProvenance(t *testing.T) {
+	t.Parallel()
+
+	clock := fixedClock{now: time.Unix(100, 0).UTC()}
+	request, err := policyengine.NewPublishRequest(
+		"tenant-a",
+		"policy.cdr",
+		[]byte("entity user {}"),
+	)
+	if err != nil {
+		t.Fatalf("NewPublishRequest() error = %v", err)
+	}
+	tests := map[string]func(testing.TB, storecontract.RevisionWrite) storecontract.PutRevisionResult{
+		"created result strips provenance": func(t testing.TB, write storecontract.RevisionWrite) storecontract.PutRevisionResult {
+			t.Helper()
+			record, err := storecontract.NewRevisionRecord(write.Metadata(), write.Artifact())
+			if err != nil {
+				t.Fatalf("NewRevisionRecord() error = %v", err)
+			}
+			result, err := storecontract.NewPutRevisionResult(record, true)
+			if err != nil {
+				t.Fatalf("NewPutRevisionResult() error = %v", err)
+			}
+			return result
+		},
+		"created result alters provenance": func(t testing.TB, write storecontract.RevisionWrite) storecontract.PutRevisionResult {
+			t.Helper()
+			alteredRequest, err := policyengine.NewPublishRequest(
+				write.Metadata().Namespace(),
+				"altered.cdr",
+				[]byte("entity altered {}"),
+			)
+			if err != nil {
+				t.Fatalf("NewPublishRequest(altered) error = %v", err)
+			}
+			provenance, err := storecontract.NewRevisionProvenance(alteredRequest)
+			if err != nil {
+				t.Fatalf("NewRevisionProvenance(altered) error = %v", err)
+			}
+			alteredWrite, err := storecontract.NewRevisionWriteWithProvenance(
+				write.Metadata(),
+				write.Artifact(),
+				provenance,
+			)
+			if err != nil {
+				t.Fatalf("NewRevisionWriteWithProvenance(altered) error = %v", err)
+			}
+			record, err := storecontract.NewRevisionRecordFromWrite(alteredWrite)
+			if err != nil {
+				t.Fatalf("NewRevisionRecordFromWrite(altered) error = %v", err)
+			}
+			result, err := storecontract.NewPutRevisionResult(record, true)
+			if err != nil {
+				t.Fatalf("NewPutRevisionResult() error = %v", err)
+			}
+			return result
+		},
+		"created result alters publication time": func(t testing.TB, write storecontract.RevisionWrite) storecontract.PutRevisionResult {
+			t.Helper()
+			id, err := policyengine.ParseRevisionID(write.Metadata().ID())
+			if err != nil {
+				t.Fatalf("ParseRevisionID() error = %v", err)
+			}
+			metadata, err := policyengine.NewRevisionMetadata(
+				write.Metadata().Namespace(),
+				id,
+				write.Metadata().PublishedAt().Add(time.Second),
+			)
+			if err != nil {
+				t.Fatalf("NewRevisionMetadata(altered) error = %v", err)
+			}
+			alteredWrite, err := storecontract.NewRevisionWriteWithProvenance(
+				metadata,
+				write.Artifact(),
+				write.Provenance(),
+			)
+			if err != nil {
+				t.Fatalf("NewRevisionWriteWithProvenance(altered) error = %v", err)
+			}
+			record, err := storecontract.NewRevisionRecordFromWrite(alteredWrite)
+			if err != nil {
+				t.Fatalf("NewRevisionRecordFromWrite(altered) error = %v", err)
+			}
+			result, err := storecontract.NewPutRevisionResult(record, true)
+			if err != nil {
+				t.Fatalf("NewPutRevisionResult() error = %v", err)
+			}
+			return result
+		},
+		"reused result strips first-writer provenance": func(t testing.TB, write storecontract.RevisionWrite) storecontract.PutRevisionResult {
+			t.Helper()
+			record, err := storecontract.NewRevisionRecord(write.Metadata(), write.Artifact())
+			if err != nil {
+				t.Fatalf("NewRevisionRecord() error = %v", err)
+			}
+			result, err := storecontract.NewPutRevisionResult(record, false)
+			if err != nil {
+				t.Fatalf("NewPutRevisionResult() error = %v", err)
+			}
+			return result
+		},
+	}
+	for name, transform := range tests {
+		transform := transform
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			adapter, err := memory.NewWithClock(clock)
+			if err != nil {
+				t.Fatalf("memory.NewWithClock() error = %v", err)
+			}
+			hostile := &transformingRevisionStore{
+				Store: adapter,
+				transform: func(write storecontract.RevisionWrite) storecontract.PutRevisionResult {
+					return transform(t, write)
+				},
+			}
+			service, err := app.NewPolicyService(hostile, allowAuthorizer{}, clock)
+			if err != nil {
+				t.Fatalf("NewPolicyService() error = %v", err)
+			}
+
+			_, err = service.Publish(context.Background(), mustCaller(t), request)
+			requireCategory(t, err, policyengine.ErrorIntegrity)
+		})
+	}
+}
+
 func TestPublishStoresCanonicalArtifactAndReusesEquivalentRevision(t *testing.T) {
 	t.Parallel()
 
@@ -424,6 +551,18 @@ type mismatchingStore struct {
 	*memory.Store
 	replacement   storecontract.PutRevisionResult
 	activateCalls int
+}
+
+type transformingRevisionStore struct {
+	*memory.Store
+	transform func(storecontract.RevisionWrite) storecontract.PutRevisionResult
+}
+
+func (s *transformingRevisionStore) PutRevision(
+	_ context.Context,
+	write storecontract.RevisionWrite,
+) (storecontract.PutRevisionResult, error) {
+	return s.transform(write), nil
 }
 
 func (s *mismatchingStore) PutRevision(

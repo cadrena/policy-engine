@@ -81,7 +81,7 @@ func (s *PolicyService) Publish(
 	if err != nil {
 		return policyengine.PublishResponse{}, err
 	}
-	if !result.Valid() || !revision.Matches(result.Record()) {
+	if !result.Valid() || !revision.Matches(result.Record(), result.Created()) {
 		return policyengine.PublishResponse{}, appError(policyengine.ErrorIntegrity)
 	}
 	return policyengine.NewPublishResponse(result.Record().Metadata(), result.Created())
@@ -145,7 +145,19 @@ func (s *PolicyService) ListRevisions(
 	); err != nil {
 		return policyengine.ListRevisionsResponse{}, err
 	}
-	return s.store.ListRevisions(ctx, validated)
+	response, err := s.store.ListRevisions(ctx, validated)
+	if err != nil {
+		return policyengine.ListRevisionsResponse{}, err
+	}
+	bound, err := policyengine.NewListRevisionsResponse(
+		validated,
+		response.Revisions(),
+		response.NextCursor(),
+	)
+	if err != nil {
+		return policyengine.ListRevisionsResponse{}, appError(policyengine.ErrorIntegrity)
+	}
+	return bound, nil
 }
 
 func appError(category policyengine.ErrorCategory) error {

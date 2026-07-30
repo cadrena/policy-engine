@@ -310,8 +310,9 @@ func (s *snapshot) Close() error {
 }
 
 type pauseControl struct {
-	entered <-chan struct{}
-	release func()
+	entered   <-chan struct{}
+	contended <-chan struct{}
+	release   func()
 }
 
 func (s *Store) pauseNextSnapshotRead() pauseControl {
@@ -324,6 +325,14 @@ func (s *Store) pauseNextDataCommit() pauseControl {
 	return pauseControl{entered: pause.entered, release: func() { pause.releaseOnce.Do(func() { close(pause.release) }) }}
 }
 func (s *Store) consumeDataCommitPause() *pauseState { return s.consumePause(&s.nextDataPause) }
+func (s *Store) pauseNextRevisionCommit() pauseControl {
+	pause := s.newPause(&s.nextRevisionPause)
+	return pauseControl{
+		entered:   pause.entered,
+		contended: pause.contended,
+		release:   func() { pause.releaseOnce.Do(func() { close(pause.release) }) },
+	}
+}
 
 func (*snapshot) String() string                 { return "Snapshot{[REDACTED]}" }
 func (*snapshot) GoString() string               { return "Snapshot{[REDACTED]}" }

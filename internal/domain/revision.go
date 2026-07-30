@@ -50,15 +50,32 @@ func NewRevision(
 // Write returns the immutable candidate for the authoritative revision store.
 func (r Revision) Write() store.RevisionWrite { return r.write }
 
-// Matches reports whether an authoritative record contains the exact canonical
-// artifact bytes and namespace-scoped content address requested by this candidate.
-func (r Revision) Matches(record store.RevisionRecord) bool {
+// Matches reports whether an authoritative result is consistent with this
+// candidate. A new record must preserve the candidate's creation metadata and
+// provenance exactly. A reused record may retain different first-writer
+// metadata, but its provenance must still be valid.
+func (r Revision) Matches(record store.RevisionRecord, created bool) bool {
 	if !r.write.Valid() || !record.Valid() {
 		return false
 	}
 	candidateMetadata := r.write.Metadata()
 	storedMetadata := record.Metadata()
-	return candidateMetadata.Namespace() == storedMetadata.Namespace() &&
-		candidateMetadata.ID() == storedMetadata.ID() &&
-		bytes.Equal(r.write.Artifact(), record.Artifact())
+	if candidateMetadata.Namespace() != storedMetadata.Namespace() ||
+		candidateMetadata.ID() != storedMetadata.ID() ||
+		!bytes.Equal(r.write.Artifact(), record.Artifact()) {
+		return false
+	}
+	storedProvenance := record.Provenance()
+	if !storedProvenance.Valid() {
+		return false
+	}
+	if !created {
+		return true
+	}
+	candidateProvenance := r.write.Provenance()
+	return candidateMetadata.PublishedAt().Equal(storedMetadata.PublishedAt()) &&
+		candidateProvenance.Valid() &&
+		candidateProvenance.SourceName() == storedProvenance.SourceName() &&
+		candidateProvenance.OriginalSourceDigest() == storedProvenance.OriginalSourceDigest() &&
+		bytes.Equal(candidateProvenance.OriginalSource(), storedProvenance.OriginalSource())
 }

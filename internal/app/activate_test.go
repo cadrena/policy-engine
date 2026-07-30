@@ -5,10 +5,137 @@ import (
 	"testing"
 	"time"
 
+	"github.com/conductera/dsl"
 	policyengine "github.com/conductera/policy-engine"
 	"github.com/conductera/policy-engine/internal/app"
+	storecontract "github.com/conductera/policy-engine/store"
 	"github.com/conductera/policy-engine/store/memory"
 )
+
+func TestPolicyServiceRejectsStoreResponsesOutsideAuthorizedRequestScope(t *testing.T) {
+	t.Parallel()
+
+	clock := fixedClock{now: time.Unix(200, 0).UTC()}
+	adapter, err := memory.NewWithClock(clock)
+	if err != nil {
+		t.Fatalf("memory.NewWithClock() error = %v", err)
+	}
+	artifact, err := dsl.CompileArtifact("foreign.cdr", []byte("entity foreign {}"))
+	if err != nil {
+		t.Fatalf("CompileArtifact() error = %v", err)
+	}
+	id, err := policyengine.RevisionIDFromArtifact(artifact)
+	if err != nil {
+		t.Fatalf("RevisionIDFromArtifact() error = %v", err)
+	}
+	metadata, err := policyengine.NewRevisionMetadata("tenant-a", id, clock.Now())
+	if err != nil {
+		t.Fatalf("NewRevisionMetadata() error = %v", err)
+	}
+	foreignActivation, err := policyengine.NewActivation(
+		"tenant-a",
+		"stable",
+		id.String(),
+		1,
+		clock.Now(),
+	)
+	if err != nil {
+		t.Fatalf("NewActivation() error = %v", err)
+	}
+	foreignListRequest, err := policyengine.NewListRevisionsRequest("tenant-a", "", 10)
+	if err != nil {
+		t.Fatalf("NewListRevisionsRequest(foreign) error = %v", err)
+	}
+	foreignList, err := policyengine.NewListRevisionsResponse(
+		foreignListRequest,
+		[]policyengine.RevisionMetadata{metadata},
+		"",
+	)
+	if err != nil {
+		t.Fatalf("NewListRevisionsResponse(foreign) error = %v", err)
+	}
+	foreignActivate, err := policyengine.NewActivateResponse(foreignActivation)
+	if err != nil {
+		t.Fatalf("NewActivateResponse(foreign) error = %v", err)
+	}
+	foreignResolve, err := policyengine.NewResolveResponse(foreignActivation)
+	if err != nil {
+		t.Fatalf("NewResolveResponse(foreign) error = %v", err)
+	}
+	foreignHistoryRequest, err := policyengine.NewListActivationHistoryRequest(
+		"tenant-a",
+		"stable",
+		"",
+		10,
+	)
+	if err != nil {
+		t.Fatalf("NewListActivationHistoryRequest(foreign) error = %v", err)
+	}
+	foreignHistory, err := policyengine.NewListActivationHistoryResponse(
+		foreignHistoryRequest,
+		[]policyengine.Activation{foreignActivation},
+		"",
+	)
+	if err != nil {
+		t.Fatalf("NewListActivationHistoryResponse(foreign) error = %v", err)
+	}
+	hostile := &scopeConfusingStore{
+		Store:      adapter,
+		revisions:  foreignList,
+		activation: foreignActivate,
+		resolve:    foreignResolve,
+		history:    foreignHistory,
+	}
+	service, err := app.NewPolicyService(hostile, allowAuthorizer{}, clock)
+	if err != nil {
+		t.Fatalf("NewPolicyService() error = %v", err)
+	}
+	ctx := context.Background()
+	caller := mustCaller(t)
+
+	t.Run("revision list", func(t *testing.T) {
+		request, err := policyengine.NewListRevisionsRequest("tenant-b", "", 10)
+		if err != nil {
+			t.Fatalf("NewListRevisionsRequest() error = %v", err)
+		}
+		_, err = service.ListRevisions(ctx, caller, request)
+		requireCategory(t, err, policyengine.ErrorIntegrity)
+	})
+	t.Run("activate", func(t *testing.T) {
+		request, err := policyengine.NewActivateRequest(
+			"tenant-b",
+			"stable",
+			id.String(),
+			policyengine.NewUnsetSlotExpectation(),
+		)
+		if err != nil {
+			t.Fatalf("NewActivateRequest() error = %v", err)
+		}
+		_, err = service.Activate(ctx, caller, request)
+		requireCategory(t, err, policyengine.ErrorIntegrity)
+	})
+	t.Run("resolve", func(t *testing.T) {
+		request, err := policyengine.NewResolveRequest("tenant-b", "stable")
+		if err != nil {
+			t.Fatalf("NewResolveRequest() error = %v", err)
+		}
+		_, err = service.Resolve(ctx, caller, request)
+		requireCategory(t, err, policyengine.ErrorIntegrity)
+	})
+	t.Run("activation history", func(t *testing.T) {
+		request, err := policyengine.NewListActivationHistoryRequest(
+			"tenant-b",
+			"stable",
+			"",
+			10,
+		)
+		if err != nil {
+			t.Fatalf("NewListActivationHistoryRequest() error = %v", err)
+		}
+		_, err = service.ListActivationHistory(ctx, caller, request)
+		requireCategory(t, err, policyengine.ErrorIntegrity)
+	})
+}
 
 func TestRollbackUsesOrdinaryActivateCAS(t *testing.T) {
 	t.Parallel()
@@ -226,3 +353,41 @@ func publishSource(
 	}
 	return response
 }
+
+type scopeConfusingStore struct {
+	*memory.Store
+	revisions  policyengine.ListRevisionsResponse
+	activation policyengine.ActivateResponse
+	resolve    policyengine.ResolveResponse
+	history    policyengine.ListActivationHistoryResponse
+}
+
+func (s *scopeConfusingStore) ListRevisions(
+	context.Context,
+	policyengine.ListRevisionsRequest,
+) (policyengine.ListRevisionsResponse, error) {
+	return s.revisions, nil
+}
+
+func (s *scopeConfusingStore) Activate(
+	context.Context,
+	policyengine.ActivateRequest,
+) (policyengine.ActivateResponse, error) {
+	return s.activation, nil
+}
+
+func (s *scopeConfusingStore) Resolve(
+	context.Context,
+	policyengine.ResolveRequest,
+) (policyengine.ResolveResponse, error) {
+	return s.resolve, nil
+}
+
+func (s *scopeConfusingStore) ListActivationHistory(
+	context.Context,
+	policyengine.ListActivationHistoryRequest,
+) (policyengine.ListActivationHistoryResponse, error) {
+	return s.history, nil
+}
+
+var _ storecontract.Store = (*scopeConfusingStore)(nil)

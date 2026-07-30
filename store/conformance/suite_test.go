@@ -59,6 +59,15 @@ func TestConformanceHarnessRejectsBrokenAdapter(t *testing.T) {
 					close(entered)
 					return conformance.DataCommitPause{Entered: entered, Release: func() {}}
 				},
+				PauseNextRevisionCommit: func() conformance.RevisionCommitPause {
+					entered := make(chan struct{})
+					close(entered)
+					contended := make(chan struct{})
+					close(contended)
+					return conformance.RevisionCommitPause{
+						Entered: entered, Contended: contended, Release: func() {},
+					}
+				},
 				ExpireEvents: func(context.Context, string, string) error {
 					return nil
 				},

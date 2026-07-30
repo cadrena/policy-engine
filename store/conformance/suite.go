@@ -44,6 +44,17 @@ type DataCommitPause struct {
 // PauseDataCommitHook pauses the next valid WriteData commit path.
 type PauseDataCommitHook func() DataCommitPause
 
+// RevisionCommitPause controls one valid PutRevision call after it owns the
+// namespace revision reservation but before authoritative commit.
+type RevisionCommitPause struct {
+	Entered   <-chan struct{}
+	Contended <-chan struct{}
+	Release   func()
+}
+
+// PauseRevisionCommitHook pauses the next valid PutRevision commit path.
+type PauseRevisionCommitHook func() RevisionCommitPause
+
 // Fixture contains a fresh adapter and deterministic black-box test hooks.
 // ExpireEvents expires retention through the supplied namespace cursor.
 // ArmNextEventAppendFailure makes the next mutation fail atomically with
@@ -60,6 +71,7 @@ type Fixture struct {
 	ArmNextSnapshotReadBlock   ArmHook
 	PauseNextSnapshotRead      PauseSnapshotReadHook
 	PauseNextDataCommit        PauseDataCommitHook
+	PauseNextRevisionCommit    PauseRevisionCommitHook
 }
 
 type testCase struct {
@@ -71,6 +83,7 @@ var cases = [...]testCase{
 	{name: "contexts-and-forged-values", run: testContextsAndForgedValues},
 	{name: "immutable-revisions-and-pagination", run: testImmutableRevisionsAndPagination},
 	{name: "revision-provenance-first-writer-wins", run: testRevisionProvenanceFirstWriterWins},
+	{name: "concurrent-equivalent-revision-first-writer-wins", run: testConcurrentEquivalentRevisionFirstWriterWins},
 	{name: "slot-cas-history-and-race", run: testSlotCASHistoryAndRace},
 	{name: "atomic-data-generations-and-snapshots", run: testAtomicDataGenerationsAndSnapshots},
 	{name: "minimum-generation-cancellation", run: testMinimumGenerationCancellation},
@@ -122,6 +135,85 @@ func testRevisionProvenanceFirstWriterWins(t *testing.T, fixture Fixture) {
 	}
 }
 
+func testConcurrentEquivalentRevisionFirstWriterWins(t *testing.T, fixture Fixture) {
+	ctx := context.Background()
+	namespace := "revision-concurrent-provenance"
+	firstSource := []byte("entity user {\n}\n")
+	equivalentSource := []byte("entity user {}")
+	first := newRevisionInputWithProvenance(t, namespace, "first.cdr", firstSource, 1)
+	equivalent := newRevisionInputWithProvenance(t, namespace, "equivalent.cdr", equivalentSource, 2)
+	if !bytes.Equal(first.write.Artifact(), equivalent.write.Artifact()) {
+		t.Fatal("test sources did not produce canonical-equivalent artifacts")
+	}
+
+	pause := fixture.PauseNextRevisionCommit()
+	type putResult struct {
+		result store.PutRevisionResult
+		err    error
+	}
+	firstDone := make(chan putResult, 1)
+	go func() {
+		result, err := fixture.Store.PutRevision(ctx, first.write)
+		firstDone <- putResult{result: result, err: err}
+	}()
+	select {
+	case <-pause.Entered:
+	case <-time.After(time.Second):
+		t.Fatal("first PutRevision() did not acquire the revision reservation")
+	}
+
+	equivalentDone := make(chan putResult, 1)
+	go func() {
+		result, err := fixture.Store.PutRevision(ctx, equivalent.write)
+		equivalentDone <- putResult{result: result, err: err}
+	}()
+	select {
+	case <-pause.Contended:
+	case <-time.After(time.Second):
+		pause.Release()
+		<-firstDone
+		t.Fatal("equivalent PutRevision() did not contend on the revision reservation")
+	}
+	select {
+	case early := <-equivalentDone:
+		pause.Release()
+		<-firstDone
+		t.Fatalf("equivalent PutRevision() returned while first commit was paused: %v", early.err)
+	default:
+	}
+	pause.Release()
+
+	created := <-firstDone
+	requireNoError(t, created.err)
+	if !created.result.Created() {
+		t.Fatal("reservation owner PutRevision() did not create revision")
+	}
+	reused := <-equivalentDone
+	requireNoError(t, reused.err)
+	if reused.result.Created() {
+		t.Fatal("concurrent canonical-equivalent PutRevision() created a second revision")
+	}
+	if got, want := reused.result.Record().Provenance().OriginalSourceDigest(), first.write.Provenance().OriginalSourceDigest(); got != want {
+		t.Fatalf("reused provenance digest = %x, want first-writer %x", got, want)
+	}
+
+	collisionInput := newRevisionInputWithProvenance(
+		t,
+		namespace,
+		"collision.cdr",
+		[]byte("entity collision {}"),
+		3,
+	)
+	collision, err := store.NewRevisionWriteWithProvenance(
+		first.write.Metadata(),
+		collisionInput.write.Artifact(),
+		collisionInput.write.Provenance(),
+	)
+	requireNoError(t, err)
+	_, err = fixture.Store.PutRevision(ctx, collision)
+	requireCategory(t, err, policyengine.ErrorIntegrity)
+}
+
 // CaseNames returns a defensive copy of the stable conformance case manifest.
 func CaseNames() []string {
 	names := make([]string, len(cases))
@@ -147,7 +239,7 @@ func Run(t *testing.T, factory Factory) {
 			if fixture.ActivationHistoryRetention < 2 || fixture.ActivationHistoryRetention > policyengine.MaxPageResponseItems {
 				t.Fatal("factory must expose activation-history retention in [2, public page maximum]")
 			}
-			if fixture.ExpireEvents == nil || fixture.ArmNextEventAppendFailure == nil || fixture.ArmNextSnapshotReadBlock == nil || fixture.PauseNextSnapshotRead == nil || fixture.PauseNextDataCommit == nil {
+			if fixture.ExpireEvents == nil || fixture.ArmNextEventAppendFailure == nil || fixture.ArmNextSnapshotReadBlock == nil || fixture.PauseNextSnapshotRead == nil || fixture.PauseNextDataCommit == nil || fixture.PauseNextRevisionCommit == nil {
 				t.Fatal("factory must configure every deterministic conformance hook")
 			}
 			test.run(t, fixture)

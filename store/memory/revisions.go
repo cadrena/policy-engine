@@ -36,24 +36,45 @@ func (s *Store) PutRevision(ctx context.Context, write store.RevisionWrite) (sto
 	// the whole revision domain for a namespace so a second publication cannot
 	// overtake a blocked one while its cancellation is being observed.
 	reservationKey := commitReservationKey{domain: "revision", namespace: namespace}
-	s.mu.Lock()
-	reservation, reserved := s.reserveCommitLocked(reservationKey)
-	if !reserved {
-		s.mu.Unlock()
-		return store.PutRevisionResult{}, engineError(policyengine.ErrorUnavailable)
-	}
-	if existing, ok := s.revisions[namespace][metadata.ID()]; ok {
-		s.releaseCommitReservationLocked(reservation)
-		s.mu.Unlock()
-		if !bytes.Equal(existing.Artifact(), artifact) {
-			return store.PutRevisionResult{}, engineError(policyengine.ErrorIntegrity)
+	var reservation *commitReservation
+	var pause *pauseState
+	for {
+		s.mu.Lock()
+		var reserved bool
+		reservation, reserved = s.reserveCommitLocked(reservationKey)
+		if !reserved {
+			current := s.reservations[reservationKey]
+			if current.revisionPause != nil {
+				current.revisionPause.contendedOnce.Do(func() {
+					close(current.revisionPause.contended)
+				})
+			}
+			wait := current.done
+			s.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-done:
+				return store.PutRevisionResult{}, contextWaitError(ctx)
+			}
 		}
-		return store.NewPutRevisionResult(existing, false)
-	}
-	if _, err := s.nextEventSequenceLocked(namespace); err != nil {
-		s.releaseCommitReservationLocked(reservation)
-		s.mu.Unlock()
-		return store.PutRevisionResult{}, err
+		if existing, ok := s.revisions[namespace][metadata.ID()]; ok {
+			s.releaseCommitReservationLocked(reservation)
+			s.mu.Unlock()
+			if !bytes.Equal(existing.Artifact(), artifact) {
+				return store.PutRevisionResult{}, engineError(policyengine.ErrorIntegrity)
+			}
+			return store.NewPutRevisionResult(existing, false)
+		}
+		if _, err := s.nextEventSequenceLocked(namespace); err != nil {
+			s.releaseCommitReservationLocked(reservation)
+			s.mu.Unlock()
+			return store.PutRevisionResult{}, err
+		}
+		pause = s.nextRevisionPause
+		s.nextRevisionPause = nil
+		reservation.revisionPause = pause
+		break
 	}
 	failEvent := s.failNextEvent
 	s.mu.Unlock()
@@ -66,6 +87,15 @@ func (s *Store) PutRevision(ctx context.Context, write store.RevisionWrite) (sto
 		}
 	}
 	defer release()
+	if pause != nil {
+		pause.enteredOnce.Do(func() { close(pause.entered) })
+		select {
+		case <-pause.release:
+		case <-done:
+			release()
+			return store.PutRevisionResult{}, contextWaitError(ctx)
+		}
+	}
 	if contextSignaled(done) {
 		release()
 		return store.PutRevisionResult{}, contextWaitError(ctx)
