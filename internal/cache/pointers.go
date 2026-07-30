@@ -188,9 +188,6 @@ func (f AuthoritativeFill) Complete(pointer SlotPointer) error {
 	if f.cache == nil || f.state == nil || !f.key.valid() {
 		return errPointerFillClosed
 	}
-	if !pointer.valid() {
-		return errInvalidSlotPointer
-	}
 
 	c := f.cache
 	c.mu.Lock()
@@ -199,6 +196,9 @@ func (f AuthoritativeFill) Complete(pointer SlotPointer) error {
 		return errPointerFillClosed
 	}
 	delete(c.fills, f.key)
+	if !pointer.valid() {
+		return errInvalidSlotPointer
+	}
 	if f.state.conflicted {
 		return errPointerConflict
 	}

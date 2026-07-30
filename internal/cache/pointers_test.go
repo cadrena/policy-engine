@@ -251,6 +251,67 @@ func TestPointerCacheCanceledFillReleasesCapacityAndRejectsLateComplete(t *testi
 	}
 }
 
+func TestPointerCacheInvalidCompleteReleasesReservationCapacity(t *testing.T) {
+	t.Parallel()
+
+	cache, err := NewPointerCache(1)
+	if err != nil {
+		t.Fatalf("NewPointerCache() error = %v", err)
+	}
+	invalidSlot := mustSlotKey(t, "tenant-a", "invalid")
+	replacementSlot := mustSlotKey(t, "tenant-a", "replacement")
+	fill, err := cache.BeginAuthoritativeFill(invalidSlot)
+	if err != nil {
+		t.Fatalf("BeginAuthoritativeFill(invalid) error = %v", err)
+	}
+	if err := fill.Complete(SlotPointer{}); err == nil {
+		t.Fatal("Complete(invalid pointer) error = nil")
+	}
+
+	replacement, err := cache.BeginAuthoritativeFill(replacementSlot)
+	if err != nil {
+		t.Fatalf("BeginAuthoritativeFill(replacement) error = %v", err)
+	}
+	if err := replacement.Complete(mustSlotPointer(t, "revision-replacement", 1)); err != nil {
+		t.Fatalf("Complete(replacement) error = %v", err)
+	}
+	if _, ok := cache.Pin(replacementSlot); !ok {
+		t.Fatal("replacement pointer missed after invalid completion")
+	}
+}
+
+func TestPointerCacheStaleCopiedTokenCannotConsumeNewReservation(t *testing.T) {
+	t.Parallel()
+
+	cache, err := NewPointerCache(1)
+	if err != nil {
+		t.Fatalf("NewPointerCache() error = %v", err)
+	}
+	slot := mustSlotKey(t, "tenant-a", "primary")
+	stale, err := cache.BeginAuthoritativeFill(slot)
+	if err != nil {
+		t.Fatalf("BeginAuthoritativeFill(stale) error = %v", err)
+	}
+	staleCopy := stale
+	stale.Cancel()
+
+	current, err := cache.BeginAuthoritativeFill(slot)
+	if err != nil {
+		t.Fatalf("BeginAuthoritativeFill(current) error = %v", err)
+	}
+	if err := staleCopy.Complete(SlotPointer{}); err != errPointerFillClosed {
+		t.Fatalf("stale Complete() error = %v, want %v", err, errPointerFillClosed)
+	}
+	pointer := mustSlotPointer(t, "revision-current", 1)
+	if err := current.Complete(pointer); err != nil {
+		t.Fatalf("current Complete() error = %v", err)
+	}
+	pin, ok := cache.Pin(slot)
+	if !ok || pin.Revision() != pointer.Revision() {
+		t.Fatalf("Pin() = (%q,%v), want (%q,true)", pin.Revision(), ok, pointer.Revision())
+	}
+}
+
 func mustSlotKey(t *testing.T, namespace, slot string) SlotKey {
 	t.Helper()
 	key, err := NewSlotKey(namespace, slot)
