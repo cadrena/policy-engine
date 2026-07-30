@@ -93,6 +93,7 @@ var cases = [...]testCase{
 	{name: "snapshot-close-waits-for-admitted-reads", run: testSnapshotCloseWaitsForAdmittedReads},
 	{name: "data-cas-noop-and-race", run: testDataCASNoopAndRace},
 	{name: "persisted-attribute-prefix-conflicts", run: testPersistedAttributePrefixConflicts},
+	{name: "attribute-descendant-occupancy", run: testAttributeDescendantOccupancy},
 	{name: "mutation-event-failure-rollback", run: testMutationEventFailureRollback},
 	{name: "idempotency-replay-conflict-and-race", run: testIdempotencyReplayConflictAndRace},
 	{name: "event-atomicity-order-and-expiry", run: testEventAtomicityOrderAndExpiry},
@@ -1274,6 +1275,55 @@ func testPersistedAttributePrefixConflicts(t *testing.T, fixture Fixture) {
 			requireNoError(t, err)
 			if response.Generation() != 2 || response.Replayed() {
 				t.Fatalf("reused failed idempotency scope response = %v", response)
+			}
+		})
+	}
+}
+
+func testAttributeDescendantOccupancy(t *testing.T, fixture Fixture) {
+	ctx := context.Background()
+	adapter := fixture.Store
+	namespace := "descendant-occupancy"
+	revision := newRevisionInput(t, namespace, "entity document {}", 1)
+	putRevision(t, adapter, revision.write)
+	entity := dsl.EntityRef{Type: "document", ID: "doc"}
+	attribute, err := policyengine.NewAttributePath(
+		entity,
+		[]string{"metadata", "classification", "level"},
+		policyengine.NewBooleanValue(true),
+	)
+	requireNoError(t, err)
+	write, err := policyengine.NewWriteDataRequest(policyengine.WriteDataRequestInput{
+		Namespace: namespace, ValidationRevisionID: revision.write.Metadata().ID(),
+		IdempotencyKey: "descendant", AttributeWrites: []policyengine.Attribute{attribute},
+	})
+	requireNoError(t, err)
+	_, err = adapter.WriteData(ctx, write)
+	requireNoError(t, err)
+	snapshot, err := adapter.OpenSnapshot(
+		ctx,
+		mustRead(t, namespace, 1, time.Unix(100, 0).UTC()),
+	)
+	requireNoError(t, err)
+	defer func() { requireNoError(t, snapshot.Close()) }()
+
+	for _, test := range []struct {
+		name string
+		path []string
+		want bool
+	}{
+		{name: "root-prefix", path: []string{"metadata"}, want: true},
+		{name: "nested-prefix", path: []string{"metadata", "classification"}, want: true},
+		{name: "exact-is-not-descendant", path: []string{"metadata", "classification", "level"}, want: false},
+		{name: "absent-sibling", path: []string{"metadata", "owner"}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key, err := policyengine.NewAttributeKeyPath(entity, test.path)
+			requireNoError(t, err)
+			got, err := snapshot.HasAttributeDescendant(ctx, key)
+			requireNoError(t, err)
+			if got != test.want {
+				t.Fatalf("HasAttributeDescendant(%v) = %t, want %t", test.path, got, test.want)
 			}
 		})
 	}

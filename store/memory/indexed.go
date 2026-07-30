@@ -573,3 +573,14 @@ func attributeDelete(root *attributeEntityNode, key policyengine.AttributeKey) *
 func attributeGet(root *attributeEntityNode, key policyengine.AttributeKey) (policyengine.Attribute, bool) {
 	return trieGet(entityGet(root, key.Entity()), key.Path())
 }
+
+func attributeHasDescendant(root *attributeEntityNode, key policyengine.AttributeKey) bool {
+	node := entityGet(root, key.Entity())
+	for _, segment := range key.Path() {
+		if node == nil {
+			return false
+		}
+		node = segmentGet(node.children, segment)
+	}
+	return node != nil && node.children != nil
+}

@@ -27,6 +27,30 @@ guard document.view {
 }
 `
 
+const scalarMetadataPolicySource = `
+entity user {}
+entity document {
+    relation viewer @user
+    action view = viewer
+}
+guard document.view {
+    allow when resource.metadata == "public"
+    allow otherwise
+}
+`
+
+const descendantMetadataPolicySource = `
+entity user {}
+entity document {
+    relation viewer @user
+    action view = viewer
+}
+guard document.view {
+    allow when resource.metadata.classification == "public"
+    allow otherwise
+}
+`
+
 func TestWriteDataRejectsStaleGenerationWithoutPartialMutation(t *testing.T) {
 	ctx := context.Background()
 	service, memoryStore := newDataServiceFixture(t)
@@ -211,21 +235,98 @@ func TestContextualAttributeScalarConflictsWithPersistentDescendant(t *testing.T
 	requireCategory(t, err, policyengine.ErrorInvalidArgument)
 }
 
+func TestContextualAttributeDescendantConflictsWithPersistentScalarAcrossRevisions(t *testing.T) {
+	ctx := context.Background()
+	service, memoryStore := newDataServiceFixtureForPolicies(
+		t,
+		scalarMetadataPolicySource,
+		descendantMetadataPolicySource,
+	)
+	persistent := stringAttribute(t, "doc-1", []string{"metadata"}, "public")
+	request := writeRequestForPolicy(
+		t,
+		"tenant-a",
+		0,
+		"attribute-schema-evolution-1",
+		scalarMetadataPolicySource,
+		nil,
+		[]policyengine.Attribute{persistent},
+	)
+	_, err := service.WriteData(ctx, dataWriterCaller(t), request)
+	requireNoError(t, err)
+	snapshot := openSnapshot(t, memoryStore, "tenant-a", 1)
+	defer func() { requireNoError(t, snapshot.Close()) }()
+	contextual, err := policyengine.NewContextualData(nil, []policyengine.Attribute{
+		stringAttribute(t, "doc-1", []string{"metadata", "classification"}, "public"),
+	})
+	requireNoError(t, err)
+
+	_, err = dataSchemaForPolicy(t, descendantMetadataPolicySource).
+		NormalizeContextualData(ctx, snapshot, contextual)
+	requireCategory(t, err, policyengine.ErrorInvalidArgument)
+}
+
+func TestContextualAttributeScalarConflictsWithPersistentDescendantAcrossRevisions(t *testing.T) {
+	ctx := context.Background()
+	service, memoryStore := newDataServiceFixtureForPolicies(
+		t,
+		descendantMetadataPolicySource,
+		scalarMetadataPolicySource,
+	)
+	persistent := stringAttribute(
+		t,
+		"doc-1",
+		[]string{"metadata", "classification"},
+		"public",
+	)
+	request := writeRequestForPolicy(
+		t,
+		"tenant-a",
+		0,
+		"attribute-schema-evolution-2",
+		descendantMetadataPolicySource,
+		nil,
+		[]policyengine.Attribute{persistent},
+	)
+	_, err := service.WriteData(ctx, dataWriterCaller(t), request)
+	requireNoError(t, err)
+	snapshot := openSnapshot(t, memoryStore, "tenant-a", 1)
+	defer func() { requireNoError(t, snapshot.Close()) }()
+	contextual, err := policyengine.NewContextualData(nil, []policyengine.Attribute{
+		stringAttribute(t, "doc-1", []string{"metadata"}, "public"),
+	})
+	requireNoError(t, err)
+
+	_, err = dataSchemaForPolicy(t, scalarMetadataPolicySource).
+		NormalizeContextualData(ctx, snapshot, contextual)
+	requireCategory(t, err, policyengine.ErrorInvalidArgument)
+}
+
 func newDataServiceFixture(t testing.TB) (*app.DataService, *memory.Store) {
+	t.Helper()
+	return newDataServiceFixtureForPolicies(t, dataPolicySource)
+}
+
+func newDataServiceFixtureForPolicies(
+	t testing.TB,
+	policies ...string,
+) (*app.DataService, *memory.Store) {
 	t.Helper()
 	clock := fixedClock{now: time.Unix(100, 0).UTC()}
 	memoryStore, err := memory.NewWithClock(clock)
 	requireNoError(t, err)
 	policyService, err := app.NewPolicyService(memoryStore, allowAuthorizer{}, clock)
 	requireNoError(t, err)
-	publishSource(
-		context.Background(),
-		t,
-		policyService,
-		dataWriterCaller(t),
-		"data-policy.cdr",
-		dataPolicySource,
-	)
+	for _, source := range policies {
+		publishSource(
+			context.Background(),
+			t,
+			policyService,
+			dataWriterCaller(t),
+			"data-policy.cdr",
+			source,
+		)
+	}
 	service, err := app.NewDataService(memoryStore, memoryStore, memoryStore, allowAuthorizer{})
 	requireNoError(t, err)
 	return service, memoryStore
@@ -240,7 +341,28 @@ func writeRequest(
 	attributes []policyengine.Attribute,
 ) policyengine.WriteDataRequest {
 	t.Helper()
-	artifact, err := dsl.CompileArtifact("data-policy.cdr", []byte(dataPolicySource))
+	return writeRequestForPolicy(
+		t,
+		namespace,
+		expectedGeneration,
+		idempotencyKey,
+		dataPolicySource,
+		tuples,
+		attributes,
+	)
+}
+
+func writeRequestForPolicy(
+	t testing.TB,
+	namespace string,
+	expectedGeneration uint64,
+	idempotencyKey string,
+	policySource string,
+	tuples []policyengine.RelationshipTuple,
+	attributes []policyengine.Attribute,
+) policyengine.WriteDataRequest {
+	t.Helper()
+	artifact, err := dsl.CompileArtifact("data-policy.cdr", []byte(policySource))
 	requireNoError(t, err)
 	revisionID, err := policyengine.RevisionIDFromArtifact(artifact)
 	requireNoError(t, err)
@@ -314,7 +436,12 @@ func stringAttribute(
 
 func dataSchema(t testing.TB) domain.DataSchema {
 	t.Helper()
-	artifact, err := dsl.CompileArtifact("data-policy.cdr", []byte(dataPolicySource))
+	return dataSchemaForPolicy(t, dataPolicySource)
+}
+
+func dataSchemaForPolicy(t testing.TB, policySource string) domain.DataSchema {
+	t.Helper()
+	artifact, err := dsl.CompileArtifact("data-policy.cdr", []byte(policySource))
 	requireNoError(t, err)
 	schema, err := domain.NewDataSchema(artifact)
 	requireNoError(t, err)

@@ -287,6 +287,58 @@ func (s *snapshot) GetAttribute(ctx context.Context, key policyengine.AttributeK
 	return result, nil
 }
 
+// HasAttributeDescendant reports whether the same entity has any value below
+// the exact structured path. Exact occupancy does not count as a descendant.
+func (s *snapshot) HasAttributeDescendant(
+	ctx context.Context,
+	key policyengine.AttributeKey,
+) (bool, error) {
+	if err := safeContextError(ctx); err != nil {
+		return false, err
+	}
+	canonical, err := policyengine.NewAttributeKeyPath(key.Entity(), key.Path())
+	if err != nil || !reflect.DeepEqual(canonical.Path(), key.Path()) {
+		return false, engineError(policyengine.ErrorInvalidArgument)
+	}
+	done, err := contextDone(ctx)
+	if err != nil {
+		return false, err
+	}
+	version, owner, err := s.admit()
+	if err != nil {
+		return false, err
+	}
+	admitted := true
+	release := func() {
+		if admitted {
+			s.release()
+			admitted = false
+		}
+	}
+	defer release()
+	if owner.consumeSnapshotReadBlock() {
+		<-done
+		release()
+		return false, contextWaitError(ctx)
+	}
+	if pause := owner.consumeSnapshotReadPause(); pause != nil {
+		pause.enteredOnce.Do(func() { close(pause.entered) })
+		select {
+		case <-pause.release:
+		case <-done:
+			release()
+			return false, contextWaitError(ctx)
+		}
+	}
+	found := attributeHasDescendant(version.attributes, canonical)
+	canceled := contextSignaled(done)
+	release()
+	if canceled {
+		return false, contextWaitError(ctx)
+	}
+	return found, nil
+}
+
 // Close flips admission before waiting, so late reads fail promptly rather than
 // queueing behind Close. The final admitted reader releases pinned references.
 func (s *snapshot) Close() error {

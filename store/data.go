@@ -80,10 +80,12 @@ func (r SnapshotRequest) Valid() bool {
 // an expiring tuple is active only when expires_at > ReadAt().
 //
 // QueryTuples returns every active match or RESOURCE_EXHAUSTED, never a partial
-// result. GetAttribute is an exact typed point lookup. After Close, both query
-// methods return FAILED_PRECONDITION. A read admitted before Close begins owns
-// its pinned resource until it returns; Close waits for every such read and
-// must not abort it. Reads arriving after Close begins fail with
+// result. GetAttribute is an exact typed point lookup. HasAttributeDescendant
+// reports only strict descendant occupancy for the same entity and structured
+// path; exact occupancy is false, and no attribute values are returned. After
+// Close, every query method returns FAILED_PRECONDITION. A read admitted before
+// Close begins owns its pinned resource until it returns; Close waits for every
+// such read and must not abort it. Reads arriving after Close begins fail with
 // FAILED_PRECONDITION. Concurrent Close calls are idempotent, wait for the same
 // admitted reads, and release transaction-compatible resources exactly once.
 type Snapshot interface {
@@ -97,6 +99,7 @@ type Snapshot interface {
 	ReadAt() time.Time
 	QueryTuples(context.Context, TupleQuery) (TupleResult, error)
 	GetAttribute(context.Context, policyengine.AttributeKey) (AttributeResult, error)
+	HasAttributeDescendant(context.Context, policyengine.AttributeKey) (bool, error)
 	Close() error
 }
 

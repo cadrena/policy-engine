@@ -2,7 +2,6 @@ package domain
 
 import (
 	"context"
-	"sort"
 
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
@@ -59,7 +58,9 @@ func (s DataSchema) NormalizeContextualData(
 			return policyengine.ContextualData{}, domainError(policyengine.ErrorInvalidArgument)
 		}
 		exactDuplicate := false
-		for _, path := range entity.attributePaths.comparablePaths(attribute.Path()) {
+		attributePath := attribute.Path()
+		for length := 1; length <= len(attributePath); length++ {
+			path := attributePath[:length]
 			key, err := policyengine.NewAttributeKeyPath(attribute.Entity(), path)
 			if err != nil {
 				return policyengine.ContextualData{}, err
@@ -75,11 +76,22 @@ func (s DataSchema) NormalizeContextualData(
 			if !found {
 				continue
 			}
-			if !equalPath(path, attribute.Path()) ||
+			if length != len(attributePath) ||
 				!equalValue(value, attribute.Value()) {
 				return policyengine.ContextualData{}, domainError(policyengine.ErrorInvalidArgument)
 			}
 			exactDuplicate = true
+		}
+		key, err := policyengine.NewAttributeKeyPath(attribute.Entity(), attributePath)
+		if err != nil {
+			return policyengine.ContextualData{}, err
+		}
+		hasDescendant, err := snapshot.HasAttributeDescendant(ctx, key)
+		if err != nil {
+			return policyengine.ContextualData{}, err
+		}
+		if hasDescendant {
+			return policyengine.ContextualData{}, domainError(policyengine.ErrorInvalidArgument)
 		}
 		if !exactDuplicate {
 			additive = append(additive, attribute)
@@ -143,46 +155,6 @@ func (t *attributePathTrie) contains(path []string) bool {
 		current = current.children[segment]
 	}
 	return current != nil && current.terminal
-}
-
-func (t *attributePathTrie) comparablePaths(path []string) [][]string {
-	current := t
-	prefix := make([]string, 0, len(path))
-	result := make([][]string, 0, len(path))
-	for _, segment := range path {
-		if current == nil {
-			return nil
-		}
-		current = current.children[segment]
-		if current == nil {
-			return nil
-		}
-		prefix = append(prefix, segment)
-		if current.terminal {
-			result = append(result, append([]string(nil), prefix...))
-		}
-	}
-	current.appendTerminalDescendants(&result, prefix)
-	return result
-}
-
-func (t *attributePathTrie) appendTerminalDescendants(result *[][]string, prefix []string) {
-	if t == nil {
-		return
-	}
-	segments := make([]string, 0, len(t.children))
-	for segment := range t.children {
-		segments = append(segments, segment)
-	}
-	sort.Strings(segments)
-	for _, segment := range segments {
-		child := t.children[segment]
-		path := append(append([]string(nil), prefix...), segment)
-		if child.terminal {
-			*result = append(*result, path)
-		}
-		child.appendTerminalDescendants(result, path)
-	}
 }
 
 func sameAttributeKey(left, right policyengine.AttributeKey) bool {

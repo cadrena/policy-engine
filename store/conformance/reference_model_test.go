@@ -843,6 +843,46 @@ func (s *referenceSnapshot) GetAttribute(ctx context.Context, key policyengine.A
 	return store.NewAttributeResult(key, attribute.Value(), true)
 }
 
+func (s *referenceSnapshot) HasAttributeDescendant(
+	ctx context.Context,
+	key policyengine.AttributeKey,
+) (bool, error) {
+	if err := store.ContextError(ctx); err != nil {
+		return false, err
+	}
+	canonical, err := policyengine.NewAttributeKeyPath(key.Entity(), key.Path())
+	if err != nil || !reflect.DeepEqual(canonical.Path(), key.Path()) {
+		return false, referenceError(policyengine.ErrorInvalidArgument)
+	}
+	s.lifecycle.RLock()
+	defer s.lifecycle.RUnlock()
+	if s.closed {
+		return false, referenceError(policyengine.ErrorFailedPrecondition)
+	}
+	if s.owner.consumeSnapshotReadBlock() {
+		<-ctx.Done()
+		return false, store.ContextError(ctx)
+	}
+	if pause := s.owner.consumeSnapshotReadPause(); pause != nil {
+		pause.enteredOnce.Do(func() { close(pause.entered) })
+		select {
+		case <-pause.release:
+		case <-ctx.Done():
+			return false, store.ContextError(ctx)
+		}
+	}
+	for _, attribute := range s.attributes {
+		if err := store.ContextError(ctx); err != nil {
+			return false, err
+		}
+		if attribute.Entity() == canonical.Entity() &&
+			strictPathPrefix(canonical.Path(), attribute.Path()) {
+			return true, nil
+		}
+	}
+	return false, store.ContextError(ctx)
+}
+
 func (s *referenceSnapshot) Close() error {
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
@@ -900,6 +940,18 @@ func pathPrefixConflict(left, right []string) bool {
 	}
 	for index := range shorter {
 		if shorter[index] != longer[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func strictPathPrefix(prefix, path []string) bool {
+	if len(prefix) >= len(path) {
+		return false
+	}
+	for index := range prefix {
+		if prefix[index] != path[index] {
 			return false
 		}
 	}
