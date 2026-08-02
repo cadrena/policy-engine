@@ -4,9 +4,10 @@
 
 Batch 1 closes the public decision-core checkpoint. Memory-backed local policy
 lifecycle, authorization data, `Check`, snapshot-pinned `BatchCheck`, privileged
-redacted `Explain`, and embedded composition are available in source on main.
-This checkpoint authorizes development of durable adapters and transports; it
-is not a stable V1 release.
+redacted `Explain`, and embedded composition are available at this source
+checkpoint on `codex/policy-engine-v1-runtime`. This checkpoint is not
+published to main yet. It authorizes development of durable adapters and
+transports; it is not a stable V1 release.
 
 SQLite, ConnectRPC, the standalone binary, the public container image, and the
 stable V1 tag remain in development. No stable tag was created for this
@@ -120,3 +121,90 @@ change. Every command exited zero:
 
 The checkpoint commit does not push, modify landing, or create a stable V1
 tag.
+
+## Fix round 1 evidence appendix
+
+This evidence was captured with parent HEAD
+`60ec784ccd055c7b0ad40ded6082c0dfc68701c9` plus the documentation corrections
+in the commit containing this appendix, whose required subject is
+`fix: correct Batch 1 checkpoint evidence`. A commit cannot contain its own
+SHA; the exact resulting SHA is recorded in the ignored Task 7 execution
+report. The commands below were run against the corrected working tree, and
+the output and exit statuses are transcribed directly from those runs.
+
+The availability predicate first demonstrated RED against `60ec784`:
+
+```text
+$ stale-main-availability predicate
+docs/release/batch-1-report.md:7:redacted `Explain`, and embedded composition are available in source on main.
+README.md:12:Available on main:
+.superpowers/sdd/2026-07-30-batch-1-policy-engine-decision-core/task-7-report.md:35:  Explain and conformance as available on main, while SQLite, ConnectRPC, the
+RED: branch-local checkpoint documentation still claims availability on main
+exit 42
+```
+
+Fresh corrected-tree evidence:
+
+```text
+$ go test ./... -count=3
+ok  github.com/cadrena/policy-engine  2.841s
+ok  github.com/cadrena/policy-engine/conformance/authorization  0.400s
+ok  github.com/cadrena/policy-engine/conformance/verifiers  0.371s
+ok  github.com/cadrena/policy-engine/embedded  0.395s
+ok  github.com/cadrena/policy-engine/internal/app  0.596s
+?   github.com/cadrena/policy-engine/internal/artifact  [no test files]
+ok  github.com/cadrena/policy-engine/internal/cache  0.379s
+?   github.com/cadrena/policy-engine/internal/domain  [no test files]
+ok  github.com/cadrena/policy-engine/internal/evaluator  0.474s
+?   github.com/cadrena/policy-engine/store  [no test files]
+ok  github.com/cadrena/policy-engine/store/conformance  1.094s
+ok  github.com/cadrena/policy-engine/store/memory  1.887s
+exit 0
+
+$ go test -race ./...
+ok  github.com/cadrena/policy-engine  (cached)
+ok  github.com/cadrena/policy-engine/conformance/authorization  (cached)
+ok  github.com/cadrena/policy-engine/conformance/verifiers  (cached)
+ok  github.com/cadrena/policy-engine/embedded  (cached)
+ok  github.com/cadrena/policy-engine/internal/app  (cached)
+?   github.com/cadrena/policy-engine/internal/artifact  [no test files]
+ok  github.com/cadrena/policy-engine/internal/cache  (cached)
+?   github.com/cadrena/policy-engine/internal/domain  [no test files]
+ok  github.com/cadrena/policy-engine/internal/evaluator  (cached)
+?   github.com/cadrena/policy-engine/store  [no test files]
+ok  github.com/cadrena/policy-engine/store/conformance  (cached)
+ok  github.com/cadrena/policy-engine/store/memory  (cached)
+exit 0
+
+$ go test ./internal/app -run 'Test.*(Concurrent|Cancellation|Redact|Replay|Budget)' -count=20
+ok  github.com/cadrena/policy-engine/internal/app  0.729s
+exit 0
+
+$ go vet ./...
+(no output)
+exit 0
+
+$ test -z "$(gofmt -l .)"
+(no output)
+exit 0
+
+$ python3 scripts/check_public_boundary.py
+(no output)
+exit 0
+
+$ python3 -m unittest scripts.test_check_public_boundary
+....................
+----------------------------------------------------------------------
+Ran 20 tests in 10.760s
+
+OK
+exit 0
+
+$ git diff --check
+(no output)
+exit 0
+
+$ corrected branch-local availability predicate
+GREEN: availability is branch-local and explicitly unpublished
+exit 0
+```

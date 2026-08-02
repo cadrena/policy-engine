@@ -3,13 +3,15 @@
 Conductera Policy Engine is an open-source, complete local policy runtime for
 relationship-based authorization of AI-agent and tool actions.
 
-> **Status:** Pre-V1 implementation. The Batch 1 decision core is available on
-> main as source, but there is no stable V1 tag. This README distinguishes
-> source availability from the frozen target V1 release contract.
+> **Status:** Pre-V1 implementation. The Batch 1 decision core is available at
+> this source checkpoint on `codex/policy-engine-v1-runtime`, but it is not
+> published to main yet and there is no stable V1 tag. This README
+> distinguishes source availability from the frozen target V1 release
+> contract.
 
 ## Current availability
 
-Available on main:
+Available at this source checkpoint:
 
 - the public module-root policy-engine contracts;
 - public composition through `embedded.New`;
