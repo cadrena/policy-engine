@@ -12,7 +12,6 @@ import (
 	policyengine "github.com/cadrena/policy-engine"
 	artifactloader "github.com/cadrena/policy-engine/internal/artifact"
 	"github.com/cadrena/policy-engine/internal/cache"
-	"github.com/cadrena/policy-engine/internal/domain"
 	"github.com/cadrena/policy-engine/internal/evaluator"
 	"github.com/cadrena/policy-engine/store"
 )
@@ -76,25 +75,12 @@ func (s *AuthorizationService) Check(
 		validated.Namespace(), validated.RequiredCapabilities()); err != nil {
 		return policyengine.CheckResponse{}, err
 	}
-	pin, err := s.resolveRevision(ctx, validated)
+	session, err := s.openEvaluationSession(ctx, caller, validated, checkFingerprint(validated), nil)
 	if err != nil {
 		return policyengine.CheckResponse{}, err
 	}
-	hydrated, err := s.loadRevision(ctx, pin)
-	if err != nil {
-		return policyengine.CheckResponse{}, err
-	}
-	evaluatedAt, err := s.evaluationTime()
-	if err != nil {
-		return policyengine.CheckResponse{}, err
-	}
-
-	snapshot, err := s.openExactSnapshot(ctx, validated, evaluatedAt)
-	if err != nil {
-		return policyengine.CheckResponse{}, err
-	}
-	result, resultErr := s.evaluatePinned(ctx, caller, validated, pin, hydrated, snapshot, evaluatedAt)
-	closeErr := snapshot.Close()
+	result, resultErr := s.evaluateSessionItem(ctx, session, validated.Subject(), validated.Resource(), validated.Action(), validated.Arguments())
+	closeErr := session.close()
 	if resultErr != nil {
 		return policyengine.CheckResponse{}, resultErr
 	}
@@ -105,6 +91,11 @@ func (s *AuthorizationService) Check(
 	if err != nil {
 		return policyengine.CheckResponse{}, appError(policyengine.ErrorInternal)
 	}
+	s.deliverDecisionEvent(ctx, result)
+	return response, nil
+}
+
+func (s *AuthorizationService) deliverDecisionEvent(ctx context.Context, result policyengine.DecisionResult) {
 	event, err := policyengine.NewCompletedDecisionEvent(policyengine.CompletedDecisionEventInput{
 		Decision: result.Decision(), ReasonCode: result.ReasonCode(), RevisionID: result.RevisionID(),
 		SlotGeneration: result.SlotGeneration(), DataGeneration: result.DataGeneration(),
@@ -114,7 +105,6 @@ func (s *AuthorizationService) Check(
 	if err == nil {
 		_ = policyengine.DeliverDecisionEvent(ctx, s.dependencies.DecisionSink, event)
 	}
-	return response, nil
 }
 
 func (s *AuthorizationService) loadRevision(ctx context.Context, pin resolvedRevision) (cache.HydratedRevision, error) {
@@ -150,7 +140,10 @@ func (s *AuthorizationService) loadRevision(ctx context.Context, pin resolvedRev
 	return value, nil
 }
 
-func (s *AuthorizationService) openExactSnapshot(ctx context.Context, request policyengine.CheckRequest, readAt time.Time) (store.Snapshot, error) {
+func (s *AuthorizationService) openExactSnapshot(ctx context.Context, request interface {
+	Namespace() string
+	MinimumGeneration() uint64
+}, readAt time.Time) (store.Snapshot, error) {
 	headRequest, err := policyengine.NewGetDataGenerationRequest(request.Namespace())
 	if err != nil {
 		return nil, err
@@ -185,82 +178,49 @@ func (s *AuthorizationService) openExactSnapshot(ctx context.Context, request po
 	return snapshot, nil
 }
 
-func (s *AuthorizationService) evaluatePinned(
+func (s *AuthorizationService) evaluateSessionItem(
 	ctx context.Context,
-	caller policyengine.Caller,
-	request policyengine.CheckRequest,
-	pin resolvedRevision,
-	hydrated cache.HydratedRevision,
-	snapshot store.Snapshot,
-	evaluatedAt time.Time,
+	session evaluationSession,
+	subject dsl.EntityRef,
+	resource dsl.EntityRef,
+	action string,
+	inputArguments map[string]policyengine.Value,
 ) (policyengine.DecisionResult, error) {
-	fingerprint := checkFingerprint(request)
-	binding, err := policyengine.NewEvidenceBinding(policyengine.EvidenceBindingInput{
-		Caller: caller.Binding(), Namespace: request.Namespace(), Selector: request.Selector(),
-		RevisionID: pin.revisionID, SlotGeneration: pin.slotGeneration,
-		DataGeneration: snapshot.Generation(), EvaluatedAt: evaluatedAt,
-		Fingerprint: policyengine.NewEvidenceFingerprint(fingerprint),
-	})
-	if err != nil {
-		return policyengine.DecisionResult{}, appError(policyengine.ErrorInternal)
-	}
-	contextual := request.ContextualData()
-	usedDelegation := false
-	if evidence := request.DelegationEvidence(); len(evidence) != 0 {
-		verification, requestErr := policyengine.NewDelegationVerificationRequest(binding, evidence)
-		if requestErr != nil {
-			return policyengine.DecisionResult{}, requestErr
-		}
-		verified, verifyErr := policyengine.InvokeDelegationVerifier(ctx, s.dependencies.DelegationVerifier, verification)
-		if verifyErr != nil {
-			return policyengine.DecisionResult{}, verifyErr
-		}
-		delegated := verified.ContextualData()
-		contextual, err = policyengine.NewContextualData(
-			append(contextual.Tuples(), delegated.Tuples()...),
-			append(contextual.Attributes(), delegated.Attributes()...),
-		)
-		if err != nil {
-			return policyengine.DecisionResult{}, err
-		}
-		usedDelegation = true
-	}
-	usedContextualData := !contextual.Empty()
-	schema, err := domain.NewDataSchema(hydrated.Artifact())
+	arguments, err := evaluator.ResolveArguments(inputArguments)
 	if err != nil {
 		return policyengine.DecisionResult{}, err
 	}
-	if err := schema.ValidateContextualTuples(contextual); err != nil {
-		return policyengine.DecisionResult{}, err
-	}
-	contextual, err = schema.NormalizeContextualData(ctx, snapshot, contextual)
-	if err != nil {
-		return policyengine.DecisionResult{}, sanitizeRuntimeError(err, policyengine.ErrorInternal)
-	}
-	reader, err := evaluator.NewSnapshotReader(snapshot, contextual)
-	if err != nil {
-		return policyengine.DecisionResult{}, err
-	}
-	arguments, err := evaluator.ResolveArguments(request.Arguments())
-	if err != nil {
-		return policyengine.DecisionResult{}, err
-	}
-	dslResult, err := hydrated.Program().Check(ctx, dsl.Request{
-		Subject: request.Subject(), Resource: request.Resource(), Action: request.Action(), Arguments: arguments,
-	}, reader)
+	dslResult, err := session.program.Check(ctx, dsl.Request{
+		Subject: subject, Resource: resource, Action: action, Arguments: arguments,
+	}, session.tupleReader)
 	if err != nil {
 		return policyengine.DecisionResult{}, sanitizeEvaluationError(err)
 	}
-	decision, requirements, usedApproval, err := s.finalizeApproval(ctx, binding, request.ApprovalEvidence(), dslResult)
+	if session.graphBudget != nil {
+		if err := session.graphBudget.add(len(dslResult.Trace), 0); err != nil {
+			return policyengine.DecisionResult{}, err
+		}
+	}
+	decision, requirements, usedApproval, err := s.finalizeApproval(ctx, session.binding, session.approvalEvidence, dslResult, session.verifierBudget)
 	if err != nil {
 		return policyengine.DecisionResult{}, err
 	}
-	decisionDigest := sha256.Sum256(append(fingerprint[:], byte(decision)))
+	itemFingerprint := sha256.New()
+	batchBinding := session.binding.Fingerprint().Bytes()
+	_, _ = itemFingerprint.Write(batchBinding[:])
+	if session.batch {
+		writeEntityFingerprint(itemFingerprint, subject)
+		writeEntityFingerprint(itemFingerprint, resource)
+		writeFingerprintString(itemFingerprint, action)
+		writeArgumentsFingerprint(itemFingerprint, inputArguments)
+	}
+	_, _ = itemFingerprint.Write([]byte{byte(decision)})
+	decisionDigest := itemFingerprint.Sum(nil)
 	result, err := policyengine.NewDecisionResult(policyengine.DecisionResultInput{
-		Decision: decision, DecisionID: hex.EncodeToString(decisionDigest[:]), ReasonCode: dslResult.Reason,
-		RevisionID: pin.revisionID, SlotGeneration: pin.slotGeneration, DataGeneration: snapshot.Generation(),
-		EvaluatedAt: evaluatedAt, Requirements: requirements, UsedContextualData: usedContextualData,
-		UsedApproval: usedApproval, UsedDelegation: usedDelegation,
+		Decision: decision, DecisionID: hex.EncodeToString(decisionDigest), ReasonCode: dslResult.Reason,
+		RevisionID: session.revisionID, SlotGeneration: session.slotGeneration, DataGeneration: session.dataGeneration,
+		EvaluatedAt: session.evaluatedAt, Requirements: requirements, UsedContextualData: session.usedContextualData,
+		UsedApproval: usedApproval, UsedDelegation: session.usedDelegation,
 	})
 	if err != nil {
 		return policyengine.DecisionResult{}, appError(policyengine.ErrorInternal)
@@ -268,7 +228,7 @@ func (s *AuthorizationService) evaluatePinned(
 	return result, nil
 }
 
-func (s *AuthorizationService) finalizeApproval(ctx context.Context, binding policyengine.EvidenceBinding, evidence []byte, result dsl.Result) (policyengine.Decision, []string, bool, error) {
+func (s *AuthorizationService) finalizeApproval(ctx context.Context, binding policyengine.EvidenceBinding, evidence []byte, result dsl.Result, budget *batchWorkBudget) (policyengine.Decision, []string, bool, error) {
 	if len(result.RequiredApprovals) == 0 && len(evidence) != 0 {
 		return 0, nil, false, appError(policyengine.ErrorFailedPrecondition)
 	}
@@ -295,6 +255,13 @@ func (s *AuthorizationService) finalizeApproval(ctx context.Context, binding pol
 		return 0, nil, false, err
 	}
 	satisfied := verified.SatisfiedRequirementIDs()
+	verifiedBytes := 8
+	for _, identifier := range satisfied {
+		verifiedBytes += 8 + len(identifier)
+	}
+	if err := budget.add(len(satisfied), verifiedBytes); err != nil {
+		return 0, nil, false, err
+	}
 	unsatisfied := make([]string, 0, len(requirements))
 	index := 0
 	for _, requirement := range requirements {
@@ -368,20 +335,30 @@ func checkFingerprint(request policyengine.CheckRequest) [sha256.Size]byte {
 	writeEntityFingerprint(hash, request.Subject())
 	writeEntityFingerprint(hash, request.Resource())
 	writeFingerprintString(hash, request.Action())
-	keys := make([]string, 0, len(request.Arguments()))
-	for key := range request.Arguments() {
+	writeArgumentsFingerprint(hash, request.Arguments())
+	var number [8]byte
+	binary.BigEndian.PutUint64(number[:], request.MinimumGeneration())
+	_, _ = hash.Write(number[:])
+	writeContextualFingerprint(hash, request.ContextualData())
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest
+}
+
+func writeArgumentsFingerprint(hash interface{ Write([]byte) (int, error) }, arguments map[string]policyengine.Value) {
+	keys := make([]string, 0, len(arguments))
+	for key := range arguments {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	arguments := request.Arguments()
 	for _, key := range keys {
 		writeFingerprintString(hash, key)
 		writeValueFingerprint(hash, arguments[key])
 	}
-	var number [8]byte
-	binary.BigEndian.PutUint64(number[:], request.MinimumGeneration())
-	_, _ = hash.Write(number[:])
-	for _, tuple := range request.ContextualData().Tuples() {
+}
+
+func writeContextualFingerprint(hash interface{ Write([]byte) (int, error) }, contextual policyengine.ContextualData) {
+	for _, tuple := range contextual.Tuples() {
 		value := tuple.Tuple()
 		writeEntityFingerprint(hash, value.Resource)
 		writeFingerprintString(hash, value.Relation)
@@ -394,16 +371,13 @@ func checkFingerprint(request policyengine.CheckRequest) [sha256.Size]byte {
 			writeFingerprintString(hash, "")
 		}
 	}
-	for _, attribute := range request.ContextualData().Attributes() {
+	for _, attribute := range contextual.Attributes() {
 		writeEntityFingerprint(hash, attribute.Entity())
 		for _, segment := range attribute.Path() {
 			writeFingerprintString(hash, segment)
 		}
 		writeValueFingerprint(hash, attribute.Value())
 	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hash.Sum(nil))
-	return digest
 }
 
 func writeEntityFingerprint(hash interface{ Write([]byte) (int, error) }, entity dsl.EntityRef) {

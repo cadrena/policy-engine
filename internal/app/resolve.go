@@ -15,7 +15,10 @@ type resolvedRevision struct {
 
 func (s *AuthorizationService) resolveRevision(
 	ctx context.Context,
-	request policyengine.CheckRequest,
+	request interface {
+		Namespace() string
+		Selector() policyengine.Selector
+	},
 ) (resolvedRevision, error) {
 	if revisionID, exact := request.Selector().ExactRevision(); exact {
 		return resolvedRevision{namespace: request.Namespace(), revisionID: revisionID}, nil
