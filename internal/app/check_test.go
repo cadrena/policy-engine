@@ -1,0 +1,498 @@
+package app_test
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/cadrena/dsl"
+	policyengine "github.com/cadrena/policy-engine"
+	"github.com/cadrena/policy-engine/internal/app"
+	"github.com/cadrena/policy-engine/internal/cache"
+	"github.com/cadrena/policy-engine/store"
+	"github.com/cadrena/policy-engine/store/memory"
+)
+
+const (
+	allowCheckSource = `
+entity user {}
+entity document {
+    relation viewer @user
+    action view = viewer
+}
+guard document.view { allow otherwise }
+`
+	denyCheckSource = `
+entity user {}
+entity document {
+    relation editor @user
+    action view = editor
+}
+guard document.view { allow otherwise }
+`
+	approvalCheckSource = `
+entity user {}
+entity document {
+    relation viewer @user
+    action view = viewer
+}
+guard document.view { require_approval finance otherwise }
+`
+)
+
+func TestCheckPinsRevisionBeforeConcurrentActivation(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	fixture.revisions.pauseNextGet()
+
+	result := make(chan policyengine.CheckResponse, 1)
+	failures := make(chan error, 1)
+	go func() {
+		response, err := fixture.service.Check(
+			context.Background(),
+			mustCaller(t),
+			fixture.checkRequest(t),
+		)
+		if err != nil {
+			failures <- err
+			return
+		}
+		result <- response
+	}()
+
+	fixture.revisions.waitUntilGet(t)
+	fixture.activate(t, fixture.denyRevision)
+	fixture.revisions.resumeGet()
+
+	select {
+	case err := <-failures:
+		t.Fatal(err)
+	case response := <-result:
+		if response.Result().RevisionID() != fixture.allowRevision {
+			t.Fatalf("revision switched during check")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("check did not complete")
+	}
+}
+
+func TestCheckMapsDSLAllowAndDenyAsDecisions(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	allowed, err := fixture.service.Check(context.Background(), mustCaller(t), fixture.checkRequest(t))
+	requireNoError(t, err)
+	if got := allowed.Result(); got.Decision() != policyengine.DecisionAllow ||
+		got.ReasonCode() != dsl.ReasonGuardAllowed || got.RevisionID() != fixture.allowRevision {
+		t.Fatalf("allow result = %#v", got)
+	}
+
+	fixture.activate(t, fixture.denyRevision)
+	denied, err := fixture.service.Check(context.Background(), mustCaller(t), fixture.checkRequest(t))
+	requireNoError(t, err)
+	if got := denied.Result(); got.Decision() != policyengine.DecisionDeny ||
+		got.ReasonCode() != dsl.ReasonGraphDenied || got.RevisionID() != fixture.denyRevision {
+		t.Fatalf("deny result = %#v", got)
+	}
+}
+
+func TestCheckRequiresAndVerifiesApprovalEvidence(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	revision := publishSource(context.Background(), t, fixture.policyService, mustCaller(t), "approval.cdr", approvalCheckSource).Revision().ID()
+	fixture.activate(t, revision)
+
+	withoutEvidence, err := fixture.service.Check(context.Background(), mustCaller(t), fixture.checkRequest(t))
+	requireNoError(t, err)
+	if got := withoutEvidence.Result(); got.Decision() != policyengine.DecisionRequireApproval ||
+		len(got.Requirements()) != 1 || got.Requirements()[0] != "finance" || got.UsedApproval() {
+		t.Fatalf("require-approval result = %#v", got)
+	}
+
+	service := fixture.newService(t, approvalVerifierFunc(func(_ context.Context, request policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error) {
+		binding := request.Binding()
+		if binding.RevisionID() != revision || binding.DataGeneration() != 0 || binding.SlotGeneration() == 0 {
+			t.Fatalf("approval binding is not exact")
+		}
+		return policyengine.NewApprovalVerificationResult([]string{"finance"})
+	}), policyengine.DefaultDelegationVerifier(), policyengine.DefaultDecisionEventSink(), fixture.adapter)
+	withEvidence := withApprovalEvidence(t, fixture.checkRequest(t), []byte("approval-token"))
+	approved, err := service.Check(context.Background(), mustCaller(t), withEvidence)
+	requireNoError(t, err)
+	if got := approved.Result(); got.Decision() != policyengine.DecisionAllow || !got.UsedApproval() || len(got.Requirements()) != 0 {
+		t.Fatalf("approved result = %#v", got)
+	}
+}
+
+func TestCheckDelegationEvidenceIsExactlyBoundAndRejectsByDefault(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	base := checkRequestForSelector(t, "production", "", nil)
+	withEvidence := withDelegationEvidence(t, base, []byte("delegation-token"))
+
+	_, err := fixture.service.Check(context.Background(), mustCaller(t), withEvidence)
+	requireCategory(t, err, policyengine.ErrorPermissionDenied)
+
+	service := fixture.newService(t, policyengine.DefaultApprovalVerifier(), delegationVerifierFunc(func(_ context.Context, request policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error) {
+		binding := request.Binding()
+		if binding.RevisionID() != fixture.allowRevision || binding.DataGeneration() != 0 || binding.SlotGeneration() == 0 {
+			t.Fatalf("delegation binding is not exact")
+		}
+		contextual, contextualErr := policyengine.NewContextualData([]policyengine.RelationshipTuple{viewerContextualTuple(t)}, nil)
+		if contextualErr != nil {
+			return policyengine.DelegationVerificationResult{}, contextualErr
+		}
+		return policyengine.NewDelegationVerificationResult(contextual)
+	}), policyengine.DefaultDecisionEventSink(), fixture.adapter)
+	response, err := service.Check(context.Background(), mustCaller(t), withEvidence)
+	requireNoError(t, err)
+	if got := response.Result(); got.Decision() != policyengine.DecisionAllow || !got.UsedDelegation() || !got.UsedContextualData() {
+		t.Fatalf("delegated result = %#v", got)
+	}
+}
+
+func TestCheckRejectsUnexpectedApprovalEvidence(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.denyRevision)
+	_, err := fixture.service.Check(context.Background(), mustCaller(t), withApprovalEvidence(t, fixture.checkRequest(t), []byte("unexpected")))
+	requireCategory(t, err, policyengine.ErrorFailedPrecondition)
+}
+
+func TestCheckUnknownSlotAndRevisionFailClosed(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	unknownSlot := checkRequestForSelector(t, "missing", "", nil)
+	_, slotErr := fixture.service.Check(context.Background(), mustCaller(t), unknownSlot)
+	requireCategory(t, slotErr, policyengine.ErrorNotFound)
+
+	unknownRevision := checkRequestForSelector(t, "", "0000000000000000000000000000000000000000000000000000000000000000", nil)
+	_, revisionErr := fixture.service.Check(context.Background(), mustCaller(t), unknownRevision)
+	requireCategory(t, revisionErr, policyengine.ErrorNotFound)
+}
+
+func TestCheckMapsArtifactSnapshotAndCancellationFailures(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+
+	badRevisions := &invalidRevisionStore{RevisionStore: fixture.adapter}
+	badService := fixture.newServiceWithStores(t, badRevisions, fixture.adapter)
+	_, err := badService.Check(context.Background(), mustCaller(t), exactCheckRequest(t, fixture.allowRevision))
+	requireCategory(t, err, policyengine.ErrorIntegrity)
+
+	openFailure := &failingDataReader{DataReader: fixture.adapter, openErr: mustEngineError(t, policyengine.ErrorUnavailable)}
+	openService := fixture.newServiceWithStores(t, fixture.adapter, openFailure)
+	_, err = openService.Check(context.Background(), mustCaller(t), exactCheckRequest(t, fixture.allowRevision))
+	requireCategory(t, err, policyengine.ErrorUnavailable)
+
+	queryFailure := &failingDataReader{DataReader: fixture.adapter, queryErr: mustEngineError(t, policyengine.ErrorResourceExhausted)}
+	queryService := fixture.newServiceWithStores(t, fixture.adapter, queryFailure)
+	_, err = queryService.Check(context.Background(), mustCaller(t), exactCheckRequest(t, fixture.allowRevision))
+	requireCategory(t, err, policyengine.ErrorResourceExhausted)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = fixture.service.Check(canceled, mustCaller(t), fixture.checkRequest(t))
+	requireCategory(t, err, policyengine.ErrorCanceled)
+}
+
+func TestCheckDecisionSinkFailureDoesNotChangeDecision(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	sink := &recordingDecisionSink{}
+	service := fixture.newService(t, policyengine.DefaultApprovalVerifier(), policyengine.DefaultDelegationVerifier(), sink, fixture.adapter)
+	response, err := service.Check(context.Background(), mustCaller(t), fixture.checkRequest(t))
+	requireNoError(t, err)
+	if response.Result().Decision() != policyengine.DecisionAllow || sink.calls != 1 {
+		t.Fatalf("decision/calls = %v/%d", response.Result().Decision(), sink.calls)
+	}
+	if sink.event.RevisionID() != fixture.allowRevision || sink.event.Decision() != policyengine.DecisionAllow {
+		t.Fatal("sink did not receive privacy-safe pinned decision metadata")
+	}
+}
+
+type authorizationFixture struct {
+	service       *app.AuthorizationService
+	policyService *app.PolicyService
+	revisions     *pausingRevisionStore
+	allowRevision string
+	denyRevision  string
+	adapter       *memory.Store
+}
+
+func newAuthorizationFixture(t testing.TB) *authorizationFixture {
+	t.Helper()
+	now := time.Unix(100, 0).UTC()
+	adapter, err := memory.NewWithClock(fixedClock{now: now})
+	requireNoError(t, err)
+	policyService, err := app.NewPolicyService(adapter, allowAuthorizer{}, fixedClock{now: now})
+	requireNoError(t, err)
+	caller := mustCaller(t)
+	allowRevision := publishSource(context.Background(), t, policyService, caller, "allow.cdr", allowCheckSource).Revision().ID()
+	denyRevision := publishSource(context.Background(), t, policyService, caller, "deny.cdr", denyCheckSource).Revision().ID()
+	revisionCache, err := cache.NewRevisionCache(cache.RevisionLimits{MaxEntries: 8, MaxBytes: 1 << 20})
+	requireNoError(t, err)
+	pointerCache, err := cache.NewPointerCache(8)
+	requireNoError(t, err)
+	revisions := newPausingRevisionStore(adapter)
+	service, err := app.NewAuthorizationService(app.AuthorizationDependencies{
+		Revisions:          revisions,
+		Slots:              adapter,
+		Data:               adapter,
+		RevisionCache:      revisionCache,
+		PointerCache:       pointerCache,
+		CallerAuthorizer:   allowAuthorizer{},
+		ApprovalVerifier:   policyengine.DefaultApprovalVerifier(),
+		DelegationVerifier: policyengine.DefaultDelegationVerifier(),
+		DecisionSink:       policyengine.DefaultDecisionEventSink(),
+		Clock:              func() time.Time { return now },
+	})
+	requireNoError(t, err)
+	return &authorizationFixture{
+		service: service, policyService: policyService, revisions: revisions,
+		allowRevision: allowRevision, denyRevision: denyRevision, adapter: adapter,
+	}
+}
+
+func (f *authorizationFixture) newService(t testing.TB, approval policyengine.ApprovalVerifier, delegation policyengine.DelegationVerifier, sink policyengine.DecisionEventSink, data store.DataReader) *app.AuthorizationService {
+	t.Helper()
+	revisionCache, err := cache.NewRevisionCache(cache.RevisionLimits{MaxEntries: 8, MaxBytes: 1 << 20})
+	requireNoError(t, err)
+	pointerCache, err := cache.NewPointerCache(8)
+	requireNoError(t, err)
+	service, err := app.NewAuthorizationService(app.AuthorizationDependencies{
+		Revisions: f.adapter, Slots: f.adapter, Data: data, RevisionCache: revisionCache,
+		PointerCache: pointerCache, CallerAuthorizer: allowAuthorizer{}, ApprovalVerifier: approval,
+		DelegationVerifier: delegation, DecisionSink: sink, Clock: func() time.Time { return time.Unix(100, 0).UTC() },
+	})
+	requireNoError(t, err)
+	return service
+}
+
+func (f *authorizationFixture) newServiceWithStores(t testing.TB, revisions store.RevisionStore, data store.DataReader) *app.AuthorizationService {
+	t.Helper()
+	revisionCache, err := cache.NewRevisionCache(cache.RevisionLimits{MaxEntries: 8, MaxBytes: 1 << 20})
+	requireNoError(t, err)
+	pointerCache, err := cache.NewPointerCache(8)
+	requireNoError(t, err)
+	service, err := app.NewAuthorizationService(app.AuthorizationDependencies{
+		Revisions: revisions, Slots: f.adapter, Data: data, RevisionCache: revisionCache,
+		PointerCache: pointerCache, CallerAuthorizer: allowAuthorizer{},
+		ApprovalVerifier: policyengine.DefaultApprovalVerifier(), DelegationVerifier: policyengine.DefaultDelegationVerifier(),
+		DecisionSink: policyengine.DefaultDecisionEventSink(), Clock: func() time.Time { return time.Unix(100, 0).UTC() },
+	})
+	requireNoError(t, err)
+	return service
+}
+
+func (f *authorizationFixture) activate(t testing.TB, revision string) {
+	t.Helper()
+	expectation := policyengine.NewUnsetSlotExpectation()
+	resolve, err := f.policyService.Resolve(context.Background(), mustCaller(t), mustResolveRequest(t, "production"))
+	if err == nil {
+		current := resolve.Activation()
+		expectation, err = policyengine.NewActiveSlotExpectation(current.RevisionID(), current.Generation())
+		requireNoError(t, err)
+	}
+	request, err := policyengine.NewActivateRequest("tenant-a", "production", revision, expectation)
+	requireNoError(t, err)
+	_, err = f.policyService.Activate(context.Background(), mustCaller(t), request)
+	requireNoError(t, err)
+}
+
+func (f *authorizationFixture) checkRequest(t testing.TB) policyengine.CheckRequest {
+	t.Helper()
+	selector, err := policyengine.NewSelector("production", "")
+	requireNoError(t, err)
+	contextualTuple, err := policyengine.NewRelationshipTuple(dsl.Tuple{
+		Resource: dsl.EntityRef{Type: "document", ID: "doc-1"},
+		Relation: "viewer",
+		Subject:  dsl.SubjectRef{Type: "user", ID: "alice"},
+	}, nil)
+	requireNoError(t, err)
+	contextual, err := policyengine.NewContextualData([]policyengine.RelationshipTuple{contextualTuple}, nil)
+	requireNoError(t, err)
+	request, err := policyengine.NewCheckRequest(policyengine.CheckRequestInput{
+		Namespace: "tenant-a", Selector: selector,
+		Subject:  dsl.EntityRef{Type: "user", ID: "alice"},
+		Resource: dsl.EntityRef{Type: "document", ID: "doc-1"},
+		Action:   "view", ContextualData: contextual,
+	})
+	requireNoError(t, err)
+	return request
+}
+
+func mustResolveRequest(t testing.TB, slot string) policyengine.ResolveRequest {
+	t.Helper()
+	request, err := policyengine.NewResolveRequest("tenant-a", slot)
+	requireNoError(t, err)
+	return request
+}
+
+func withApprovalEvidence(t testing.TB, request policyengine.CheckRequest, evidence []byte) policyengine.CheckRequest {
+	t.Helper()
+	result, err := policyengine.NewCheckRequest(policyengine.CheckRequestInput{
+		Namespace: request.Namespace(), Selector: request.Selector(), Subject: request.Subject(), Resource: request.Resource(),
+		Action: request.Action(), Arguments: request.Arguments(), ContextualData: request.ContextualData(),
+		ApprovalEvidence: evidence, DelegationEvidence: request.DelegationEvidence(), MinimumGeneration: request.MinimumGeneration(),
+	})
+	requireNoError(t, err)
+	return result
+}
+
+func withDelegationEvidence(t testing.TB, request policyengine.CheckRequest, evidence []byte) policyengine.CheckRequest {
+	t.Helper()
+	result, err := policyengine.NewCheckRequest(policyengine.CheckRequestInput{
+		Namespace: request.Namespace(), Selector: request.Selector(), Subject: request.Subject(), Resource: request.Resource(),
+		Action: request.Action(), Arguments: request.Arguments(), ContextualData: request.ContextualData(),
+		ApprovalEvidence: request.ApprovalEvidence(), DelegationEvidence: evidence, MinimumGeneration: request.MinimumGeneration(),
+	})
+	requireNoError(t, err)
+	return result
+}
+
+func exactCheckRequest(t testing.TB, revision string) policyengine.CheckRequest {
+	t.Helper()
+	return checkRequestForSelector(t, "", revision, []policyengine.RelationshipTuple{viewerContextualTuple(t)})
+}
+
+func checkRequestForSelector(t testing.TB, slot, revision string, tuples []policyengine.RelationshipTuple) policyengine.CheckRequest {
+	t.Helper()
+	selector, err := policyengine.NewSelector(slot, revision)
+	requireNoError(t, err)
+	contextual, err := policyengine.NewContextualData(tuples, nil)
+	requireNoError(t, err)
+	request, err := policyengine.NewCheckRequest(policyengine.CheckRequestInput{
+		Namespace: "tenant-a", Selector: selector, Subject: dsl.EntityRef{Type: "user", ID: "alice"},
+		Resource: dsl.EntityRef{Type: "document", ID: "doc-1"}, Action: "view", ContextualData: contextual,
+	})
+	requireNoError(t, err)
+	return request
+}
+
+func viewerContextualTuple(t testing.TB) policyengine.RelationshipTuple {
+	t.Helper()
+	tuple, err := policyengine.NewRelationshipTuple(dsl.Tuple{
+		Resource: dsl.EntityRef{Type: "document", ID: "doc-1"}, Relation: "viewer",
+		Subject: dsl.SubjectRef{Type: "user", ID: "alice"},
+	}, nil)
+	requireNoError(t, err)
+	return tuple
+}
+
+type approvalVerifierFunc func(context.Context, policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error)
+
+func (f approvalVerifierFunc) VerifyApproval(ctx context.Context, request policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error) {
+	return f(ctx, request)
+}
+
+type delegationVerifierFunc func(context.Context, policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error)
+
+func (f delegationVerifierFunc) VerifyDelegation(ctx context.Context, request policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error) {
+	return f(ctx, request)
+}
+
+type invalidRevisionStore struct{ store.RevisionStore }
+
+func (s *invalidRevisionStore) GetRevision(context.Context, policyengine.GetRevisionRequest) (store.RevisionRecord, error) {
+	return store.RevisionRecord{}, nil
+}
+
+type failingDataReader struct {
+	store.DataReader
+	openErr  error
+	queryErr error
+}
+
+func (r *failingDataReader) OpenSnapshot(ctx context.Context, request store.SnapshotRequest) (store.Snapshot, error) {
+	if r.openErr != nil {
+		return nil, r.openErr
+	}
+	snapshot, err := r.DataReader.OpenSnapshot(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &failingSnapshot{Snapshot: snapshot, queryErr: r.queryErr}, nil
+}
+
+type failingSnapshot struct {
+	store.Snapshot
+	queryErr error
+}
+
+func (s *failingSnapshot) QueryTuples(ctx context.Context, query store.TupleQuery) (store.TupleResult, error) {
+	if s.queryErr != nil {
+		return store.TupleResult{}, s.queryErr
+	}
+	return s.Snapshot.QueryTuples(ctx, query)
+}
+
+type recordingDecisionSink struct {
+	calls int
+	event policyengine.CompletedDecisionEvent
+}
+
+func (s *recordingDecisionSink) RecordDecision(_ context.Context, event policyengine.CompletedDecisionEvent) policyengine.DecisionDelivery {
+	s.calls++
+	s.event = event
+	delivery, _ := policyengine.NewDecisionDelivery(policyengine.DecisionDeliveryFailed, "DELIVERY_FAILED")
+	return delivery
+}
+
+func mustEngineError(t testing.TB, category policyengine.ErrorCategory) error {
+	t.Helper()
+	err, constructorErr := policyengine.NewEngineError(category)
+	requireNoError(t, constructorErr)
+	return err
+}
+
+type pausingRevisionStore struct {
+	store.RevisionStore
+	mu      sync.Mutex
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newPausingRevisionStore(revisions store.RevisionStore) *pausingRevisionStore {
+	return &pausingRevisionStore{RevisionStore: revisions}
+}
+
+func (s *pausingRevisionStore) pauseNextGet() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entered = make(chan struct{})
+	s.release = make(chan struct{})
+}
+
+func (s *pausingRevisionStore) GetRevision(ctx context.Context, request policyengine.GetRevisionRequest) (store.RevisionRecord, error) {
+	s.mu.Lock()
+	entered, release := s.entered, s.release
+	s.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return store.RevisionRecord{}, ctx.Err()
+		}
+	}
+	return s.RevisionStore.GetRevision(ctx, request)
+}
+
+func (s *pausingRevisionStore) waitUntilGet(t testing.TB) {
+	t.Helper()
+	s.mu.Lock()
+	entered := s.entered
+	s.mu.Unlock()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("revision load did not start")
+	}
+}
+
+func (s *pausingRevisionStore) resumeGet() {
+	s.mu.Lock()
+	release := s.release
+	s.entered = nil
+	s.release = nil
+	s.mu.Unlock()
+	close(release)
+}
