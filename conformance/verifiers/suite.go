@@ -14,6 +14,12 @@ import (
 
 const approvalRequirement = "conformance-approval"
 
+// InvocationObserver exposes the point at which a conformance verifier has
+// entered its external operation and begun observing the request context.
+type InvocationObserver interface {
+	InvocationEntered() <-chan struct{}
+}
+
 // RunApproval verifies canonical approval and cancellation behavior through
 // the public invocation boundary.
 func RunApproval(t *testing.T, factory func(t *testing.T) policyengine.ApprovalVerifier) {
@@ -33,13 +39,21 @@ func RunApproval(t *testing.T, factory func(t *testing.T) policyengine.ApprovalV
 	})
 	t.Run("observes canceled invocation", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
+		defer cancel()
+		verifier := factory(t)
+		observer := invocationObserver(t, verifier)
 		request, err := policyengine.NewApprovalVerificationRequest(
-			binding(t), []string{approvalRequirement}, []byte("conformance-evidence"),
+			binding(t), []string{approvalRequirement}, []byte("conformance-cancellation"),
 		)
 		requireNoError(t, err)
-		_, err = policyengine.InvokeApprovalVerifier(ctx, factory(t), request)
-		requireCategory(t, err, policyengine.ErrorCanceled)
+		failures := make(chan error, 1)
+		go func() {
+			_, invokeErr := policyengine.InvokeApprovalVerifier(ctx, verifier, request)
+			failures <- invokeErr
+		}()
+		awaitEntered(t, observer.InvocationEntered())
+		cancel()
+		requireCategory(t, awaitFailure(t, failures), policyengine.ErrorCanceled)
 	})
 }
 
@@ -52,18 +66,69 @@ func RunDelegation(t *testing.T, factory func(t *testing.T) policyengine.Delegat
 		requireNoError(t, err)
 		result, err := policyengine.InvokeDelegationVerifier(context.Background(), factory(t), request)
 		requireNoError(t, err)
-		if got := len(result.ContextualData().Tuples()); got != 1 {
-			t.Fatalf("delegated tuple count = %d, want 1", got)
+		expected := DelegatedContextualData(t)
+		actual := result.ContextualData()
+		if len(actual.Attributes()) != len(expected.Attributes()) || len(actual.Tuples()) != 1 {
+			t.Fatal("delegated contextual fact cardinality mismatch")
+		}
+		wantTuple := expected.Tuples()[0]
+		gotTuple := actual.Tuples()[0]
+		want := wantTuple.Tuple()
+		got := gotTuple.Tuple()
+		wantExpiry, wantExpires := wantTuple.ExpiresAt()
+		gotExpiry, gotExpires := gotTuple.ExpiresAt()
+		if got.Resource.Type != want.Resource.Type || got.Resource.ID != want.Resource.ID ||
+			got.Relation != want.Relation || got.Subject.Type != want.Subject.Type ||
+			got.Subject.ID != want.Subject.ID || got.Subject.Relation != want.Subject.Relation ||
+			gotExpires != wantExpires || (gotExpires && !gotExpiry.Equal(wantExpiry)) {
+			t.Fatal("delegated tuple does not exactly match the conformance fact")
 		}
 	})
 	t.Run("observes canceled invocation", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		request, err := policyengine.NewDelegationVerificationRequest(binding(t), []byte("conformance-evidence"))
+		defer cancel()
+		verifier := factory(t)
+		observer := invocationObserver(t, verifier)
+		request, err := policyengine.NewDelegationVerificationRequest(binding(t), []byte("conformance-cancellation"))
 		requireNoError(t, err)
-		_, err = policyengine.InvokeDelegationVerifier(ctx, factory(t), request)
-		requireCategory(t, err, policyengine.ErrorCanceled)
+		failures := make(chan error, 1)
+		go func() {
+			_, invokeErr := policyengine.InvokeDelegationVerifier(ctx, verifier, request)
+			failures <- invokeErr
+		}()
+		awaitEntered(t, observer.InvocationEntered())
+		cancel()
+		requireCategory(t, awaitFailure(t, failures), policyengine.ErrorCanceled)
 	})
+}
+
+func invocationObserver(t testing.TB, verifier any) InvocationObserver {
+	t.Helper()
+	observer, ok := verifier.(InvocationObserver)
+	if !ok || observer == nil {
+		t.Fatal("conformance verifier does not implement InvocationObserver")
+	}
+	return observer
+}
+
+func awaitEntered(t testing.TB, entered <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for verifier invocation")
+	}
+}
+
+func awaitFailure(t testing.TB, failures <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-failures:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for canceled verifier")
+	}
+	return nil
 }
 
 func binding(t testing.TB) policyengine.EvidenceBinding {

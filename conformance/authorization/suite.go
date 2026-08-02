@@ -7,10 +7,19 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
 )
+
+// PinningController supplies deterministic pause points after authoritative
+// revision selection and after a data snapshot has been opened. Conformance
+// factories must return an Engine that also implements this interface.
+type PinningController interface {
+	PauseNextRevisionLoad() (entered <-chan struct{}, resume func())
+	PauseNextSnapshotOpen() (entered <-chan struct{}, resume func())
+}
 
 const (
 	// AuthorizedCallerID identifies the caller a conformance factory must map to
@@ -85,23 +94,40 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 		}
 	})
 
-	t.Run("exact revision remains pinned after slot change", func(t *testing.T) {
+	t.Run("check retains revision pinned before concurrent slot change", func(t *testing.T) {
 		engine := factory(t)
+		controller := pinningController(t, engine)
 		allowRevision := publish(t, engine, "allow.cdr", allowSource)
 		activate(t, engine, allowRevision)
 		denyRevision := publish(t, engine, "deny.cdr", denySource)
+		request := check(t, "stable", "", "alice", "document-1", contextualViewer(t, "alice", "document-1"))
+		actor := caller(t, AuthorizedCallerID)
+		entered, resume := controller.PauseNextRevisionLoad()
+		responses := make(chan policyengine.CheckResponse, 1)
+		failures := make(chan error, 1)
+		go func() {
+			response, err := engine.Check(context.Background(), actor, request)
+			if err != nil {
+				failures <- err
+				return
+			}
+			responses <- response
+		}()
+		awaitSignal(t, entered, "revision load")
 		activateFrom(t, engine, allowRevision, denyRevision)
-		response, err := engine.Check(context.Background(), caller(t, AuthorizedCallerID), check(t, "", allowRevision, "alice", "document-1", contextualViewer(t, "alice", "document-1")))
-		requireNoError(t, err)
+		resume()
+		response := awaitCheck(t, responses, failures)
 		if response.Result().RevisionID() != allowRevision || response.Result().Decision() != policyengine.DecisionAllow {
-			t.Fatalf("exact revision was not retained")
+			t.Fatalf("check switched away from the revision pinned before activation")
 		}
 	})
 
-	t.Run("batch pins one data snapshot", func(t *testing.T) {
+	t.Run("batch retains snapshot pinned before concurrent data write", func(t *testing.T) {
 		engine := factory(t)
+		controller := pinningController(t, engine)
 		revision := publish(t, engine, "snapshot.cdr", allowSource)
 		activate(t, engine, revision)
+		writeViewers(t, engine, revision, "initial-snapshot-data", 0, "alice", "document-1", "document-2")
 		selector, err := policyengine.NewSelector("stable", "")
 		requireNoError(t, err)
 		first, err := policyengine.NewBatchCheckItem(
@@ -114,18 +140,39 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 			dsl.EntityRef{Type: "document", ID: "document-2"}, "view", nil,
 		)
 		requireNoError(t, err)
-		contextual := contextualViewers(t, "alice", "document-1", "document-2")
 		request, err := policyengine.NewBatchCheckRequest(policyengine.BatchCheckRequestInput{
 			Namespace: policyNamespace, Selector: selector,
-			Items: []policyengine.BatchCheckItem{first, second}, ContextualData: contextual,
+			Items: []policyengine.BatchCheckItem{first, second},
 		})
 		requireNoError(t, err)
-		response, err := engine.BatchCheck(context.Background(), caller(t, AuthorizedCallerID), request)
-		requireNoError(t, err)
+		actor := caller(t, AuthorizedCallerID)
+		entered, resume := controller.PauseNextSnapshotOpen()
+		responses := make(chan policyengine.BatchCheckResponse, 1)
+		failures := make(chan error, 1)
+		go func() {
+			response, err := engine.BatchCheck(context.Background(), actor, request)
+			if err != nil {
+				failures <- err
+				return
+			}
+			responses <- response
+		}()
+		awaitSignal(t, entered, "data snapshot")
+		deleteViewer(t, engine, revision, "concurrent-conformance-delete", 1, "alice", "document-2")
+		resume()
+		response := awaitBatch(t, responses, failures)
 		results := response.Results()
-		if len(results) != 2 || results[0].DataGeneration() != results[1].DataGeneration() ||
-			results[0].RevisionID() != results[1].RevisionID() {
-			t.Fatal("batch items did not share one pinned policy and data snapshot")
+		if len(results) != 2 || results[0].DataGeneration() != 1 || results[1].DataGeneration() != 1 ||
+			results[0].RevisionID() != revision || results[1].RevisionID() != revision ||
+			results[0].Decision() != policyengine.DecisionAllow || results[1].Decision() != policyengine.DecisionAllow {
+			t.Fatal("batch did not retain the policy and generation pinned before the write")
+		}
+		headRequest, err := policyengine.NewGetDataGenerationRequest(policyNamespace)
+		requireNoError(t, err)
+		head, err := engine.GetDataGeneration(context.Background(), caller(t, AuthorizedCallerID), headRequest)
+		requireNoError(t, err)
+		if head.Generation() != 2 {
+			t.Fatalf("concurrent write generation = %d, want 2", head.Generation())
 		}
 	})
 
@@ -213,7 +260,23 @@ func contextualViewer(t testing.TB, subjectID, resourceID string) policyengine.C
 	return result
 }
 
-func contextualViewers(t testing.TB, subjectID string, resourceIDs ...string) policyengine.ContextualData {
+func caller(t testing.TB, id string) policyengine.Caller {
+	t.Helper()
+	result, err := policyengine.NewCaller(id, nil)
+	requireNoError(t, err)
+	return result
+}
+
+func pinningController(t testing.TB, engine policyengine.Engine) PinningController {
+	t.Helper()
+	controller, ok := engine.(PinningController)
+	if !ok || controller == nil {
+		t.Fatal("conformance factory engine does not implement PinningController")
+	}
+	return controller
+}
+
+func writeViewers(t testing.TB, engine policyengine.Engine, revision, idempotencyKey string, expected uint64, subjectID string, resourceIDs ...string) {
 	t.Helper()
 	tuples := make([]policyengine.RelationshipTuple, 0, len(resourceIDs))
 	for _, resourceID := range resourceIDs {
@@ -224,16 +287,65 @@ func contextualViewers(t testing.TB, subjectID string, resourceIDs ...string) po
 		requireNoError(t, err)
 		tuples = append(tuples, tuple)
 	}
-	result, err := policyengine.NewContextualData(tuples, nil)
+	request, err := policyengine.NewWriteDataRequest(policyengine.WriteDataRequestInput{
+		Namespace: policyNamespace, ValidationRevisionID: revision,
+		ExpectedGeneration: expected, IdempotencyKey: idempotencyKey, TupleWrites: tuples,
+	})
 	requireNoError(t, err)
-	return result
+	_, err = engine.WriteData(context.Background(), caller(t, AuthorizedCallerID), request)
+	requireNoError(t, err)
 }
 
-func caller(t testing.TB, id string) policyengine.Caller {
+func deleteViewer(t testing.TB, engine policyengine.Engine, revision, idempotencyKey string, expected uint64, subjectID, resourceID string) {
 	t.Helper()
-	result, err := policyengine.NewCaller(id, nil)
+	key, err := policyengine.NewTupleKey(dsl.Tuple{
+		Resource: dsl.EntityRef{Type: "document", ID: resourceID}, Relation: "viewer",
+		Subject: dsl.SubjectRef{Type: "user", ID: subjectID},
+	})
 	requireNoError(t, err)
-	return result
+	request, err := policyengine.NewWriteDataRequest(policyengine.WriteDataRequestInput{
+		Namespace: policyNamespace, ValidationRevisionID: revision,
+		ExpectedGeneration: expected, IdempotencyKey: idempotencyKey,
+		TupleDeletes: []policyengine.TupleKey{key},
+	})
+	requireNoError(t, err)
+	_, err = engine.WriteData(context.Background(), caller(t, AuthorizedCallerID), request)
+	requireNoError(t, err)
+}
+
+func awaitSignal(t testing.TB, signal <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s pause", name)
+	}
+}
+
+func awaitCheck(t testing.TB, responses <-chan policyengine.CheckResponse, failures <-chan error) policyengine.CheckResponse {
+	t.Helper()
+	select {
+	case response := <-responses:
+		return response
+	case err := <-failures:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for concurrent check")
+	}
+	return policyengine.CheckResponse{}
+}
+
+func awaitBatch(t testing.TB, responses <-chan policyengine.BatchCheckResponse, failures <-chan error) policyengine.BatchCheckResponse {
+	t.Helper()
+	select {
+	case response := <-responses:
+		return response
+	case err := <-failures:
+		t.Fatal(err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for concurrent batch")
+	}
+	return policyengine.BatchCheckResponse{}
 }
 
 func requireNoError(t testing.TB, err error) {
