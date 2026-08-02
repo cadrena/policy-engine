@@ -3,6 +3,7 @@ package evaluator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -124,6 +125,84 @@ func TestSnapshotReaderRejectsContextualPersistentAttributePathConflicts(t *test
 			requireCategory(t, err, policyengine.ErrorInvalidArgument)
 		})
 	}
+}
+
+func TestSnapshotReaderRejectsContextualPersistentPathConflictsWhenResolvingPersistentPath(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		contextual []string
+		persistent []string
+	}{
+		{name: "persistent child has contextual ancestor", contextual: []string{"metadata"}, persistent: []string{"metadata", "classification"}},
+		{name: "persistent parent has contextual descendant", contextual: []string{"metadata", "classification"}, persistent: []string{"metadata"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, err := memory.New()
+			requireNoError(t, err)
+			writeAttribute(t, adapter, 0, "persisted", test.persistent, policyengine.NewBooleanValue(true))
+			snapshot := openSnapshot(t, adapter, 1)
+			t.Cleanup(func() { requireNoError(t, snapshot.Close()) })
+			contextual := mustContextualData(t, nil, []policyengine.Attribute{mustAttribute(t, test.contextual, policyengine.NewBooleanValue(true))})
+			reader, err := NewSnapshotReader(snapshot, contextual)
+			requireNoError(t, err)
+
+			_, _, err = reader.ResolveAttribute(context.Background(), dsl.EntityRef{Type: "document", ID: "doc-1"}, test.persistent)
+			requireCategory(t, err, policyengine.ErrorInvalidArgument)
+		})
+	}
+}
+
+func TestSnapshotReaderChecksCancellationDuringCanonicalUnion(t *testing.T) {
+	adapter, err := memory.New()
+	requireNoError(t, err)
+	snapshot := openSnapshot(t, adapter, 0)
+	t.Cleanup(func() { requireNoError(t, snapshot.Close()) })
+
+	resource := dsl.EntityRef{Type: "document", ID: "doc-1"}
+	query, err := store.NewTupleQuery(resource, "viewer", policyengine.MaxAggregateWorkItems)
+	requireNoError(t, err)
+	subjects := make([]dsl.SubjectRef, 1024)
+	for index := range subjects {
+		subjects[index] = dsl.SubjectRef{Type: "user", ID: fmt.Sprintf("user-%04d", index)}
+	}
+	result, err := store.NewTupleResult(query, subjects)
+	requireNoError(t, err)
+
+	processingCtx := newStagedCancelContext(2)
+	reader, err := NewSnapshotReader(&querySnapshot{
+		Snapshot: snapshot,
+		result:   result,
+		afterQuery: func() {
+			processingCtx.arm()
+		},
+	}, policyengine.ContextualData{})
+	requireNoError(t, err)
+
+	_, err = reader.ReadTuples(processingCtx, resource, "viewer")
+	requireCategory(t, err, policyengine.ErrorCanceled)
+}
+
+func TestSnapshotReaderChargesDuplicateWorkBeforeCanonicalUnion(t *testing.T) {
+	adapter, err := memory.New()
+	requireNoError(t, err)
+	snapshot := openSnapshot(t, adapter, 0)
+	t.Cleanup(func() { requireNoError(t, snapshot.Close()) })
+
+	resource := dsl.EntityRef{Type: "document", ID: "doc-1"}
+	query, err := store.NewTupleQuery(resource, "viewer", policyengine.MaxAggregateWorkItems)
+	requireNoError(t, err)
+	subjects := make([]dsl.SubjectRef, policyengine.MaxAggregateWorkItems)
+	for index := range subjects {
+		subjects[index] = dsl.SubjectRef{Type: "user", ID: fmt.Sprintf("%05x", index)}
+	}
+	result, err := store.NewTupleResult(query, subjects)
+	requireNoError(t, err)
+	contextual := mustContextualData(t, []string{subjects[0].ID}, nil)
+	reader, err := NewSnapshotReader(&querySnapshot{Snapshot: snapshot, result: result}, contextual)
+	requireNoError(t, err)
+
+	_, err = reader.ReadTuples(context.Background(), resource, "viewer")
+	requireCategory(t, err, policyengine.ErrorResourceExhausted)
 }
 
 func TestSnapshotReaderRejectsCanceledAndInvalidAttributeResolution(t *testing.T) {
@@ -260,4 +339,42 @@ func requireCategory(t *testing.T, err error, want policyengine.ErrorCategory) {
 	if !errors.As(err, &engineErr) || engineErr.Category() != want {
 		t.Fatalf("error = %v, want %s", err, want)
 	}
+}
+
+type querySnapshot struct {
+	store.Snapshot
+	result     store.TupleResult
+	afterQuery func()
+}
+
+func (s *querySnapshot) QueryTuples(context.Context, store.TupleQuery) (store.TupleResult, error) {
+	if s.afterQuery != nil {
+		s.afterQuery()
+	}
+	return s.result, nil
+}
+
+type stagedCancelContext struct {
+	context.Context
+	cancel    context.CancelFunc
+	threshold int
+	armed     bool
+	checks    int
+}
+
+func newStagedCancelContext(threshold int) *stagedCancelContext {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &stagedCancelContext{Context: ctx, cancel: cancel, threshold: threshold}
+}
+
+func (c *stagedCancelContext) arm() { c.armed = true }
+
+func (c *stagedCancelContext) Err() error {
+	if c.armed {
+		c.checks++
+		if c.checks == c.threshold {
+			c.cancel()
+		}
+	}
+	return c.Context.Err()
 }

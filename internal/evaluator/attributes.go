@@ -44,16 +44,24 @@ func (r *SnapshotReader) ResolveAttribute(
 
 	var contextual policyengine.Value
 	contextualFound := false
+	contextualPathConflict := false
 	for index, attribute := range r.contextualAttributes {
 		if index%64 == 0 {
 			if err := store.ContextError(ctx); err != nil {
 				return nil, false, err
 			}
 		}
-		if attribute.Entity() == entity && samePath(attribute.Path(), path) {
+		if attribute.Entity() != entity {
+			continue
+		}
+		attributePath := attribute.Path()
+		if samePath(attributePath, path) {
 			contextual = attribute.Value()
 			contextualFound = true
-			break
+			continue
+		}
+		if pathPrefix(attributePath, path) || pathPrefix(path, attributePath) {
+			contextualPathConflict = true
 		}
 	}
 	if err := store.ContextError(ctx); err != nil {
@@ -65,6 +73,9 @@ func (r *SnapshotReader) ResolveAttribute(
 		return nil, false, err
 	}
 	persistentValue, persistentFound := persistent.Value()
+	if persistentFound && contextualPathConflict {
+		return nil, false, invalidArgument()
+	}
 	if contextualFound && persistentFound && contextual != persistentValue {
 		return nil, false, invalidArgument()
 	}
@@ -118,6 +129,18 @@ func (r *SnapshotReader) rejectPersistentPathConflict(
 		}
 	}
 	return store.ContextError(ctx)
+}
+
+func pathPrefix(prefix, path []string) bool {
+	if len(prefix) >= len(path) {
+		return false
+	}
+	for index := range prefix {
+		if prefix[index] != path[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func resolveValue(value policyengine.Value) (any, error) {

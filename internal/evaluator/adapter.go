@@ -5,7 +5,6 @@ package evaluator
 import (
 	"context"
 	"reflect"
-	"sort"
 
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
@@ -73,11 +72,17 @@ func (r *SnapshotReader) ReadTuples(ctx context.Context, resource dsl.EntityRef,
 	if err != nil {
 		return nil, err
 	}
-	subjects = append(subjects, result.Subjects()...)
-	if len(subjects) > policyengine.MaxAggregateWorkItems+policyengine.MaxContextualTuples {
+	if err := store.ContextError(ctx); err != nil {
+		return nil, err
+	}
+	persistent := result.Subjects()
+	if len(persistent) > policyengine.MaxAggregateWorkItems-len(subjects) {
 		return nil, resourceExhausted()
 	}
-	subjects = canonicalSubjects(subjects)
+	subjects, err = canonicalSubjects(ctx, subjects, persistent)
+	if err != nil {
+		return nil, err
+	}
 	if len(subjects) > policyengine.MaxAggregateWorkItems {
 		return nil, resourceExhausted()
 	}
@@ -87,28 +92,70 @@ func (r *SnapshotReader) ReadTuples(ctx context.Context, resource dsl.EntityRef,
 	return subjects, nil
 }
 
-func canonicalSubjects(subjects []dsl.SubjectRef) []dsl.SubjectRef {
-	sort.Slice(subjects, func(i, j int) bool {
-		if subjects[i].Type != subjects[j].Type {
-			return subjects[i].Type < subjects[j].Type
+func canonicalSubjects(ctx context.Context, contextual, persistent []dsl.SubjectRef) ([]dsl.SubjectRef, error) {
+	canonical := make([]dsl.SubjectRef, 0, len(contextual)+len(persistent))
+	appendSubject := func(subject dsl.SubjectRef) {
+		if len(canonical) == 0 || canonical[len(canonical)-1] != subject {
+			canonical = append(canonical, subject)
 		}
-		if subjects[i].ID != subjects[j].ID {
-			return subjects[i].ID < subjects[j].ID
+	}
+	contextualIndex := 0
+	persistentIndex := 0
+	for contextualIndex < len(contextual) || persistentIndex < len(persistent) {
+		if (contextualIndex+persistentIndex)%64 == 0 {
+			if err := store.ContextError(ctx); err != nil {
+				return nil, err
+			}
 		}
-		return subjects[i].Relation < subjects[j].Relation
-	})
-	write := 0
-	for _, subject := range subjects {
-		if write > 0 && subject == subjects[write-1] {
+		if contextualIndex == len(contextual) {
+			appendSubject(persistent[persistentIndex])
+			persistentIndex++
 			continue
 		}
-		subjects[write] = subject
-		write++
+		if persistentIndex == len(persistent) {
+			appendSubject(contextual[contextualIndex])
+			contextualIndex++
+			continue
+		}
+		switch compareSubjects(contextual[contextualIndex], persistent[persistentIndex]) {
+		case -1:
+			appendSubject(contextual[contextualIndex])
+			contextualIndex++
+		case 0:
+			appendSubject(contextual[contextualIndex])
+			contextualIndex++
+			persistentIndex++
+		case 1:
+			appendSubject(persistent[persistentIndex])
+			persistentIndex++
+		}
 	}
-	for index := write; index < len(subjects); index++ {
-		subjects[index] = dsl.SubjectRef{}
+	if err := store.ContextError(ctx); err != nil {
+		return nil, err
 	}
-	return subjects[:write]
+	return canonical, nil
+}
+
+func compareSubjects(left, right dsl.SubjectRef) int {
+	if left.Type < right.Type {
+		return -1
+	}
+	if left.Type > right.Type {
+		return 1
+	}
+	if left.ID < right.ID {
+		return -1
+	}
+	if left.ID > right.ID {
+		return 1
+	}
+	if left.Relation < right.Relation {
+		return -1
+	}
+	if left.Relation > right.Relation {
+		return 1
+	}
+	return 0
 }
 
 func nilSnapshot(snapshot store.Snapshot) bool {
