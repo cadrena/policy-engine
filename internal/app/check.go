@@ -186,24 +186,36 @@ func (s *AuthorizationService) evaluateSessionItem(
 	action string,
 	inputArguments map[string]policyengine.Value,
 ) (policyengine.DecisionResult, error) {
+	result, _, err := s.evaluateSessionItemWithTrace(ctx, session, subject, resource, action, inputArguments)
+	return result, err
+}
+
+func (s *AuthorizationService) evaluateSessionItemWithTrace(
+	ctx context.Context,
+	session evaluationSession,
+	subject dsl.EntityRef,
+	resource dsl.EntityRef,
+	action string,
+	inputArguments map[string]policyengine.Value,
+) (policyengine.DecisionResult, []dsl.TraceStep, error) {
 	arguments, err := evaluator.ResolveArguments(inputArguments)
 	if err != nil {
-		return policyengine.DecisionResult{}, err
+		return policyengine.DecisionResult{}, nil, err
 	}
 	dslResult, err := session.program.Check(ctx, dsl.Request{
 		Subject: subject, Resource: resource, Action: action, Arguments: arguments,
 	}, session.tupleReader)
 	if err != nil {
-		return policyengine.DecisionResult{}, sanitizeEvaluationError(err)
+		return policyengine.DecisionResult{}, nil, sanitizeEvaluationError(err)
 	}
 	if session.graphBudget != nil {
 		if err := session.graphBudget.add(len(dslResult.Trace), 0); err != nil {
-			return policyengine.DecisionResult{}, err
+			return policyengine.DecisionResult{}, nil, err
 		}
 	}
 	decision, requirements, usedApproval, err := s.finalizeApproval(ctx, session.binding, session.approvalEvidence, dslResult, session.verifierBudget)
 	if err != nil {
-		return policyengine.DecisionResult{}, err
+		return policyengine.DecisionResult{}, nil, err
 	}
 	itemFingerprint := sha256.New()
 	batchBinding := session.binding.Fingerprint().Bytes()
@@ -223,9 +235,9 @@ func (s *AuthorizationService) evaluateSessionItem(
 		UsedApproval: usedApproval, UsedDelegation: session.usedDelegation,
 	})
 	if err != nil {
-		return policyengine.DecisionResult{}, appError(policyengine.ErrorInternal)
+		return policyengine.DecisionResult{}, nil, appError(policyengine.ErrorInternal)
 	}
-	return result, nil
+	return result, dslResult.Trace, nil
 }
 
 func (s *AuthorizationService) finalizeApproval(ctx context.Context, binding policyengine.EvidenceBinding, evidence []byte, result dsl.Result, budget *batchWorkBudget) (policyengine.Decision, []string, bool, error) {

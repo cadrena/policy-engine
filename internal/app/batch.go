@@ -18,6 +18,7 @@ type evaluationSession struct {
 	dataGeneration uint64
 	evaluatedAt    time.Time
 	program        *dsl.Program
+	artifact       *dsl.Artifact
 	reader         *evaluator.SnapshotReader
 	close          func() error
 
@@ -210,7 +211,7 @@ func (s *AuthorizationService) openEvaluationSession(
 	return evaluationSession{
 		revisionID: pin.revisionID, slotGeneration: pin.slotGeneration,
 		dataGeneration: snapshot.Generation(), evaluatedAt: evaluatedAt,
-		program: hydrated.Program(), reader: reader, close: snapshot.Close,
+		program: hydrated.Program(), artifact: hydrated.Artifact(), reader: reader, close: snapshot.Close,
 		binding:            binding,
 		usedContextualData: usedContextualData, usedDelegation: usedDelegation,
 		approvalEvidence: request.ApprovalEvidence(), tupleReader: reader, verifierBudget: verifierBudget,
