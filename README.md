@@ -3,13 +3,32 @@
 Conductera Policy Engine is an open-source, complete local policy runtime for
 relationship-based authorization of AI-agent and tool actions.
 
-> **Status:** Pre-V1 implementation. This README describes the frozen V1 release
-> contract; availability is established only by a tagged release and its
-> changelog.
+> **Status:** Pre-V1 implementation. The Batch 1 decision core is available on
+> main as source, but there is no stable V1 tag. This README distinguishes
+> source availability from the frozen target V1 release contract.
 
-The contract below describes the target V1 surface, not a claim that every
-feature is available at the current commit. Consult release notes before relying
-on an API in production.
+## Current availability
+
+Available on main:
+
+- the public module-root policy-engine contracts;
+- public composition through `embedded.New`;
+- memory-backed local policy publication, activation, authorization-data
+  generation reads and writes, and state events;
+- snapshot-pinned `Check` and `BatchCheck`;
+- privileged redacted `Explain`;
+- public authorization and verifier conformance suites.
+
+Still in development:
+
+- SQLite storage;
+- the ConnectRPC transport and standalone binary;
+- the public container image;
+- the stable V1 tag and release artifacts.
+
+The contract below describes the complete target V1 surface. Source
+availability at a checkpoint is not a production-readiness or compatibility
+promise; consult tagged release notes before relying on an API in production.
 
 ## V1 scope
 
@@ -33,17 +52,26 @@ system, fleet manager, or enterprise audit platform.
 
 ## Embedded package
 
-Consumers import the package from the module root:
+Consumers import contracts from the module root:
 
 ```go
 import policyengine "github.com/cadrena/policy-engine"
 ```
 
-> The embedded package is located at the module root. Do not import a redundant
-> `/policyengine` subpackage.
+> The public contracts are located at the module root. Do not import a
+> redundant `/policyengine` subpackage.
 
-The embedded API and standalone ConnectRPC transport share one evaluator core.
-The standalone server is compatible with Connect, gRPC, and gRPC-Web.
+The available embedded composition package is imported separately:
+
+```go
+import "github.com/cadrena/policy-engine/embedded"
+
+engine, err := embedded.New(/* sealed options */)
+```
+
+The embedded API and planned standalone ConnectRPC transport share one
+evaluator core. The standalone server is intended to be compatible with
+Connect, gRPC, and gRPC-Web; that transport remains in development.
 
 ## Policy language
 
