@@ -154,6 +154,31 @@ func TestCheckDelegationEvidenceIsExactlyBoundAndRejectsByDefault(t *testing.T) 
 	}
 }
 
+func TestCheckRejectsInvalidDirectContextualDataBeforeDelegationVerification(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	invalidTuple, err := policyengine.NewRelationshipTuple(dsl.Tuple{
+		Resource: dsl.EntityRef{Type: "document", ID: "doc-1"}, Relation: "viewer",
+		Subject: dsl.SubjectRef{Type: "group", ID: "finance"},
+	}, nil)
+	requireNoError(t, err)
+	request := withDelegationEvidence(t,
+		checkRequestForSelector(t, "production", "", []policyengine.RelationshipTuple{invalidTuple}),
+		[]byte("delegation-token"),
+	)
+	var calls atomic.Int32
+	service := fixture.newService(t, policyengine.DefaultApprovalVerifier(), delegationVerifierFunc(func(context.Context, policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error) {
+		calls.Add(1)
+		return policyengine.NewDelegationVerificationResult(policyengine.ContextualData{})
+	}), policyengine.DefaultDecisionEventSink(), fixture.adapter)
+
+	_, err = service.Check(context.Background(), mustCaller(t), request)
+	requireCategory(t, err, policyengine.ErrorInvalidArgument)
+	if calls.Load() != 0 {
+		t.Fatalf("delegation verifier calls = %d, want 0 for invalid direct contextual data", calls.Load())
+	}
+}
+
 func TestCheckRejectsContextualTuplesOutsideSelectedArtifactSchema(t *testing.T) {
 	for _, test := range []struct {
 		name  string

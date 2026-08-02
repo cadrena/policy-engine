@@ -76,11 +76,14 @@ implementation rather than a later fix round.
 | Direct or delegated contextual tuples could use undeclared schema shapes; recursive `errors.As`/`errors.Is` could invoke hostile dependency methods; exact-generation race handling required an adversarial close/fail-closed regression. | `7fff5e65c4e83698932cb2579b85045ab203f663` (`fix: harden pinned authorization check`) |
 | The first Check mapping allowed approval evidence with no requirements to become a normal decision instead of a typed unexpected-evidence error. | `89fa91ce94e609b3543f09c1581079485b90740d` (`feat: add pinned authorization check`) |
 | The initial BatchCheck implementation verified delegation more than once instead of once against the complete ordered-batch binding. | `8bbce2cfb20056bd8f6788be66dce991c4338d23` (`feat: add snapshot-pinned batch authorization`) |
+| The shared evaluation session invoked `DelegationVerifier` before artifact-validating and additively normalizing direct contextual data. | This fix commit (`fix: validate contextual data before delegation`) |
 | Explain conversion initially needed an exact-artifact allowlist so forged trace entity, declaration, or kind values could not cross the redaction boundary. | `eac9259de7900bf9fc9bf026c39d4f1ba656bc6f` (`feat: add privileged redacted explain`) |
 | Initial public conformance tests did not force in-flight revision/data changes and verifier cancellation through the real invocation boundary, and delegation comparison was too shallow. | `23ce1bbd6146327c6c259402afeba9b010cf01cb` (`fix: harden embedded conformance suites`) |
 
-The Task 7 review found no additional code defect in the shipped Batch 1 scope.
-The remaining gaps are declared development work, not hidden availability:
+The final whole-branch review found one additional ordering defect in the shared
+evaluation session; the fix above restores the §9 requirement that invalid
+direct contextual input fail before any delegation verifier call. The remaining
+gaps are declared development work, not hidden availability:
 SQLite, ConnectRPC, the standalone binary, the image, and stable release
 packaging.
 
@@ -206,5 +209,47 @@ exit 0
 
 $ corrected branch-local availability predicate
 GREEN: availability is branch-local and explicitly unpublished
+exit 0
+```
+
+## Final whole-branch fix evidence appendix
+
+The verifier-order regression first demonstrated RED against parent HEAD
+`4042a26da4d431c701177743e7d7c44e7106bc28`:
+
+```text
+$ go test ./internal/app -run '^TestCheckRejectsInvalidDirectContextualDataBeforeDelegationVerification$' -count=1
+--- FAIL: TestCheckRejectsInvalidDirectContextualDataBeforeDelegationVerification (0.00s)
+    check_test.go:178: delegation verifier calls = 1, want 0 for invalid direct contextual data
+FAIL
+exit 1
+```
+
+After reordering the shared session, the focused regression, exact-binding and
+schema checks, and valid direct-plus-delegated additive batch behavior passed.
+Fresh Check/Batch/Explain, repository, race, static-analysis, public-boundary,
+formatting, and diff gates all exited zero:
+
+```text
+$ go test ./internal/app -run 'Test(Check|BatchCheck|Explain)' -count=1
+ok  github.com/cadrena/policy-engine/internal/app  0.299s
+
+$ go test ./... -count=1
+PASS: all packages
+
+$ go test -race ./... -count=1
+PASS: all packages under the race detector
+
+$ go vet ./...
+exit 0
+
+$ python3 scripts/check_public_boundary.py
+exit 0
+
+$ python3 -m unittest scripts.test_check_public_boundary
+Ran 20 tests in 10.541s
+OK
+
+$ test -z "$(gofmt -l .)" && git diff --check
 exit 0
 ```

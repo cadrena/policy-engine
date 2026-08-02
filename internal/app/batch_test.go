@@ -167,6 +167,41 @@ func TestBatchCheckDelegationUsesOneCompleteOrderedBatchBinding(t *testing.T) {
 	}
 }
 
+func TestBatchCheckAdditivelyMergesValidDirectAndDelegatedContextualData(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	service := fixture.newService(t, policyengine.DefaultApprovalVerifier(), delegationVerifierFunc(func(context.Context, policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error) {
+		delegated, err := policyengine.NewRelationshipTuple(dsl.Tuple{
+			Resource: dsl.EntityRef{Type: "document", ID: "doc-2"}, Relation: "viewer",
+			Subject: dsl.SubjectRef{Type: "user", ID: "alice"},
+		}, nil)
+		if err != nil {
+			return policyengine.DelegationVerificationResult{}, err
+		}
+		contextual, err := policyengine.NewContextualData([]policyengine.RelationshipTuple{delegated}, nil)
+		if err != nil {
+			return policyengine.DelegationVerificationResult{}, err
+		}
+		return policyengine.NewDelegationVerificationResult(contextual)
+	}), policyengine.DefaultDecisionEventSink(), fixture.adapter)
+	base := fixture.batchRequestWithDelegation(t, []byte("delegation"), "doc-1", "doc-2")
+	direct, err := policyengine.NewContextualData([]policyengine.RelationshipTuple{viewerContextualTuple(t)}, nil)
+	requireNoError(t, err)
+	request, err := policyengine.NewBatchCheckRequest(policyengine.BatchCheckRequestInput{
+		Namespace: base.Namespace(), Selector: base.Selector(), Items: base.Items(),
+		ContextualData: direct, DelegationEvidence: base.DelegationEvidence(),
+	})
+	requireNoError(t, err)
+
+	response, err := service.BatchCheck(context.Background(), mustCaller(t), request)
+	requireNoError(t, err)
+	for index, result := range response.Results() {
+		if result.Decision() != policyengine.DecisionAllow || !result.UsedContextualData() || !result.UsedDelegation() {
+			t.Fatalf("result %d = %#v, want allow using direct and delegated contextual data", index, result)
+		}
+	}
+}
+
 func TestBatchCheckEnforcesAggregateGraphWorkBudget(t *testing.T) {
 	fixture := newAuthorizationFixture(t)
 	fixture.activate(t, fixture.allowRevision)

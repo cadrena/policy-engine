@@ -167,7 +167,18 @@ func (s *AuthorizationService) openEvaluationSession(
 	if err != nil {
 		return fail(appError(policyengine.ErrorInternal))
 	}
+	schema, err := domain.NewDataSchema(hydrated.Artifact())
+	if err != nil {
+		return fail(err)
+	}
 	contextual := request.ContextualData()
+	if err := schema.ValidateContextualTuples(contextual); err != nil {
+		return fail(err)
+	}
+	contextual, err = schema.NormalizeContextualData(ctx, snapshot, contextual)
+	if err != nil {
+		return fail(sanitizeRuntimeError(err, policyengine.ErrorInternal))
+	}
 	usedDelegation := false
 	if evidence := request.DelegationEvidence(); len(evidence) != 0 {
 		verification, requestErr := policyengine.NewDelegationVerificationRequest(binding, evidence)
@@ -183,6 +194,9 @@ func (s *AuthorizationService) openEvaluationSession(
 		if budgetErr := verifierBudget.add(delegatedItems, contextualDataVerifierBytes(delegated)); budgetErr != nil {
 			return fail(budgetErr)
 		}
+		if err := schema.ValidateContextualTuples(delegated); err != nil {
+			return fail(err)
+		}
 		contextual, err = policyengine.NewContextualData(
 			append(contextual.Tuples(), delegated.Tuples()...),
 			append(contextual.Attributes(), delegated.Attributes()...),
@@ -190,20 +204,13 @@ func (s *AuthorizationService) openEvaluationSession(
 		if err != nil {
 			return fail(err)
 		}
+		contextual, err = schema.NormalizeContextualData(ctx, snapshot, contextual)
+		if err != nil {
+			return fail(sanitizeRuntimeError(err, policyengine.ErrorInternal))
+		}
 		usedDelegation = true
 	}
 	usedContextualData := !contextual.Empty()
-	schema, err := domain.NewDataSchema(hydrated.Artifact())
-	if err != nil {
-		return fail(err)
-	}
-	if err := schema.ValidateContextualTuples(contextual); err != nil {
-		return fail(err)
-	}
-	contextual, err = schema.NormalizeContextualData(ctx, snapshot, contextual)
-	if err != nil {
-		return fail(sanitizeRuntimeError(err, policyengine.ErrorInternal))
-	}
 	reader, err := evaluator.NewSnapshotReader(snapshot, contextual)
 	if err != nil {
 		return fail(err)
