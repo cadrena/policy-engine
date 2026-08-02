@@ -21,6 +21,17 @@ func (s DataSchema) ValidateTuplePaths(request policyengine.WriteDataRequest) er
 	return nil
 }
 
+// ValidateContextualTuples requires every direct or verifier-supplied tuple to
+// match a relation target declared by the selected artifact.
+func (s DataSchema) ValidateContextualTuples(contextual policyengine.ContextualData) error {
+	for _, tuple := range contextual.Tuples() {
+		if !s.validTuple(tuple.Tuple()) {
+			return domainError(policyengine.ErrorInvalidArgument)
+		}
+	}
+	return nil
+}
+
 func (s DataSchema) validTuple(tuple dsl.Tuple) bool {
 	entity, ok := s.entities[tuple.Resource.Type]
 	if !ok {

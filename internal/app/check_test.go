@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,7 +89,10 @@ func TestCheckMapsDSLAllowAndDenyAsDecisions(t *testing.T) {
 	}
 
 	fixture.activate(t, fixture.denyRevision)
-	denied, err := fixture.service.Check(context.Background(), mustCaller(t), fixture.checkRequest(t))
+	deniedRequest := checkRequestForSelector(t, "production", "", []policyengine.RelationshipTuple{
+		mustContextualTuple(t, "document", "editor", "user", "bob"),
+	})
+	denied, err := fixture.service.Check(context.Background(), mustCaller(t), deniedRequest)
 	requireNoError(t, err)
 	if got := denied.Result(); got.Decision() != policyengine.DecisionDeny ||
 		got.ReasonCode() != dsl.ReasonGraphDenied || got.RevisionID() != fixture.denyRevision {
@@ -150,10 +154,66 @@ func TestCheckDelegationEvidenceIsExactlyBoundAndRejectsByDefault(t *testing.T) 
 	}
 }
 
+func TestCheckRejectsContextualTuplesOutsideSelectedArtifactSchema(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		tuple dsl.Tuple
+	}{
+		{name: "undeclared relation", tuple: dsl.Tuple{
+			Resource: dsl.EntityRef{Type: "document", ID: "doc-1"}, Relation: "owner",
+			Subject: dsl.SubjectRef{Type: "user", ID: "alice"},
+		}},
+		{name: "undeclared resource type", tuple: dsl.Tuple{
+			Resource: dsl.EntityRef{Type: "invoice", ID: "invoice-1"}, Relation: "viewer",
+			Subject: dsl.SubjectRef{Type: "user", ID: "alice"},
+		}},
+		{name: "wrong relation target", tuple: dsl.Tuple{
+			Resource: dsl.EntityRef{Type: "document", ID: "doc-1"}, Relation: "viewer",
+			Subject: dsl.SubjectRef{Type: "group", ID: "finance"},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAuthorizationFixture(t)
+			fixture.activate(t, fixture.allowRevision)
+			contextualTuple, err := policyengine.NewRelationshipTuple(test.tuple, nil)
+			requireNoError(t, err)
+			request := checkRequestForSelector(t, "production", "", []policyengine.RelationshipTuple{contextualTuple})
+
+			_, err = fixture.service.Check(context.Background(), mustCaller(t), request)
+			requireCategory(t, err, policyengine.ErrorInvalidArgument)
+		})
+	}
+}
+
+func TestCheckRejectsDelegatedTuplesOutsideSelectedArtifactSchema(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	base := checkRequestForSelector(t, "production", "", nil)
+	request := withDelegationEvidence(t, base, []byte("delegation-token"))
+	invalidTuple, err := policyengine.NewRelationshipTuple(dsl.Tuple{
+		Resource: dsl.EntityRef{Type: "document", ID: "doc-1"}, Relation: "viewer",
+		Subject: dsl.SubjectRef{Type: "group", ID: "finance"},
+	}, nil)
+	requireNoError(t, err)
+	service := fixture.newService(t, policyengine.DefaultApprovalVerifier(), delegationVerifierFunc(func(context.Context, policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error) {
+		contextual, contextualErr := policyengine.NewContextualData([]policyengine.RelationshipTuple{invalidTuple}, nil)
+		if contextualErr != nil {
+			return policyengine.DelegationVerificationResult{}, contextualErr
+		}
+		return policyengine.NewDelegationVerificationResult(contextual)
+	}), policyengine.DefaultDecisionEventSink(), fixture.adapter)
+
+	_, err = service.Check(context.Background(), mustCaller(t), request)
+	requireCategory(t, err, policyengine.ErrorInvalidArgument)
+}
+
 func TestCheckRejectsUnexpectedApprovalEvidence(t *testing.T) {
 	fixture := newAuthorizationFixture(t)
 	fixture.activate(t, fixture.denyRevision)
-	_, err := fixture.service.Check(context.Background(), mustCaller(t), withApprovalEvidence(t, fixture.checkRequest(t), []byte("unexpected")))
+	deniedRequest := checkRequestForSelector(t, "production", "", []policyengine.RelationshipTuple{
+		mustContextualTuple(t, "document", "editor", "user", "bob"),
+	})
+	_, err := fixture.service.Check(context.Background(), mustCaller(t), withApprovalEvidence(t, deniedRequest, []byte("unexpected")))
 	requireCategory(t, err, policyengine.ErrorFailedPrecondition)
 }
 
@@ -191,6 +251,97 @@ func TestCheckMapsArtifactSnapshotAndCancellationFailures(t *testing.T) {
 	cancel()
 	_, err = fixture.service.Check(canceled, mustCaller(t), fixture.checkRequest(t))
 	requireCategory(t, err, policyengine.ErrorCanceled)
+}
+
+func TestCheckDoesNotTraverseHostileDependencyErrors(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	request := exactCheckRequest(t, fixture.allowRevision)
+
+	t.Run("As cannot manufacture a category", func(t *testing.T) {
+		manufactured := mustEngineError(t, policyengine.ErrorPermissionDenied).(*policyengine.EngineError)
+		hostile := &manufacturingAsError{manufactured: manufactured}
+		service := fixture.newServiceWithStores(t, &errorRevisionStore{RevisionStore: fixture.adapter, err: hostile}, fixture.adapter)
+		_, err, panicValue := checkWithoutPanic(service, request, t)
+		if panicValue != nil {
+			t.Fatalf("Check panicked: %v", panicValue)
+		}
+		requireCategory(t, err, policyengine.ErrorInternal)
+		if hostile.called.Load() {
+			t.Fatal("hostile As was invoked")
+		}
+	})
+
+	t.Run("Unwrap cannot panic", func(t *testing.T) {
+		hostile := &panickingUnwrapError{}
+		service := fixture.newServiceWithStores(t, &errorRevisionStore{RevisionStore: fixture.adapter, err: hostile}, fixture.adapter)
+		_, err, panicValue := checkWithoutPanic(service, request, t)
+		if panicValue != nil {
+			t.Fatalf("Check panicked: %v", panicValue)
+		}
+		requireCategory(t, err, policyengine.ErrorInternal)
+		if hostile.called.Load() {
+			t.Fatal("hostile Unwrap was invoked")
+		}
+	})
+
+	t.Run("DSL tuple-reader wrapping cannot manufacture a category", func(t *testing.T) {
+		manufactured := mustEngineError(t, policyengine.ErrorPermissionDenied).(*policyengine.EngineError)
+		hostile := &manufacturingAsError{manufactured: manufactured}
+		data := &failingDataReader{DataReader: fixture.adapter, queryErr: hostile}
+		service := fixture.newServiceWithStores(t, fixture.adapter, data)
+		_, err, panicValue := checkWithoutPanic(service, request, t)
+		if panicValue != nil {
+			t.Fatalf("Check panicked: %v", panicValue)
+		}
+		requireCategory(t, err, policyengine.ErrorFailedPrecondition)
+		if hostile.called.Load() {
+			t.Fatal("hostile As inside DSL CheckError was invoked")
+		}
+	})
+}
+
+func TestCheckClosesNewerSnapshotAndFailsWhenDataAdvancesAfterHeadRead(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	fixture.activate(t, fixture.allowRevision)
+	data := newPausingOpenDataReader(fixture.adapter)
+	sink := &recordingDecisionSink{}
+	service := fixture.newService(t, policyengine.DefaultApprovalVerifier(), policyengine.DefaultDelegationVerifier(), sink, data)
+	result := make(chan policyengine.CheckResponse, 1)
+	failures := make(chan error, 1)
+	go func() {
+		response, err := service.Check(context.Background(), mustCaller(t), fixture.checkRequest(t))
+		if err != nil {
+			failures <- err
+			return
+		}
+		result <- response
+	}()
+
+	data.waitUntilOpen(t)
+	write, err := policyengine.NewWriteDataRequest(policyengine.WriteDataRequestInput{
+		Namespace: "tenant-a", ValidationRevisionID: fixture.allowRevision,
+		ExpectedGeneration: 0, IdempotencyKey: "advance-after-head",
+		TupleWrites: []policyengine.RelationshipTuple{viewerTuple(t, "bob", "doc-2")},
+	})
+	requireNoError(t, err)
+	_, err = fixture.adapter.WriteData(context.Background(), write)
+	requireNoError(t, err)
+	data.resumeOpen()
+
+	select {
+	case response := <-result:
+		t.Fatalf("Check returned decision from changed generation: %#v", response.Result())
+	case err := <-failures:
+		requireCategory(t, err, policyengine.ErrorFailedPrecondition)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Check did not complete")
+	}
+	if snapshot := data.openedSnapshot(); snapshot == nil || snapshot.closeCalls.Load() != 1 {
+		t.Fatal("newer snapshot was not closed exactly once")
+	}
+	if sink.calls != 0 {
+		t.Fatalf("decision sink calls = %d, want 0", sink.calls)
+	}
 }
 
 func TestCheckDecisionSinkFailureDoesNotChangeDecision(t *testing.T) {
@@ -377,6 +528,16 @@ func viewerContextualTuple(t testing.TB) policyengine.RelationshipTuple {
 	return tuple
 }
 
+func mustContextualTuple(t testing.TB, resourceType, relation, subjectType, subjectID string) policyengine.RelationshipTuple {
+	t.Helper()
+	tuple, err := policyengine.NewRelationshipTuple(dsl.Tuple{
+		Resource: dsl.EntityRef{Type: resourceType, ID: "doc-1"}, Relation: relation,
+		Subject: dsl.SubjectRef{Type: subjectType, ID: subjectID},
+	}, nil)
+	requireNoError(t, err)
+	return tuple
+}
+
 type approvalVerifierFunc func(context.Context, policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error)
 
 func (f approvalVerifierFunc) VerifyApproval(ctx context.Context, request policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error) {
@@ -393,6 +554,47 @@ type invalidRevisionStore struct{ store.RevisionStore }
 
 func (s *invalidRevisionStore) GetRevision(context.Context, policyengine.GetRevisionRequest) (store.RevisionRecord, error) {
 	return store.RevisionRecord{}, nil
+}
+
+type errorRevisionStore struct {
+	store.RevisionStore
+	err error
+}
+
+func (s *errorRevisionStore) GetRevision(context.Context, policyengine.GetRevisionRequest) (store.RevisionRecord, error) {
+	return store.RevisionRecord{}, s.err
+}
+
+type manufacturingAsError struct {
+	called       atomic.Bool
+	manufactured *policyengine.EngineError
+}
+
+func (*manufacturingAsError) Error() string { return "secret dependency diagnostic" }
+
+func (e *manufacturingAsError) As(target any) bool {
+	e.called.Store(true)
+	if destination, ok := target.(**policyengine.EngineError); ok {
+		*destination = e.manufactured
+		return true
+	}
+	return false
+}
+
+type panickingUnwrapError struct{ called atomic.Bool }
+
+func (*panickingUnwrapError) Error() string { return "secret dependency diagnostic" }
+
+func (e *panickingUnwrapError) Unwrap() error {
+	e.called.Store(true)
+	panic("hostile Unwrap invoked")
+}
+
+func checkWithoutPanic(service *app.AuthorizationService, request policyengine.CheckRequest, t testing.TB) (response policyengine.CheckResponse, err error, panicValue any) {
+	t.Helper()
+	defer func() { panicValue = recover() }()
+	response, err = service.Check(context.Background(), mustCaller(t), request)
+	return response, err, nil
 }
 
 type failingDataReader struct {
@@ -415,6 +617,63 @@ func (r *failingDataReader) OpenSnapshot(ctx context.Context, request store.Snap
 type failingSnapshot struct {
 	store.Snapshot
 	queryErr error
+}
+
+type pausingOpenDataReader struct {
+	store.DataReader
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	opened  *trackingSnapshot
+}
+
+func newPausingOpenDataReader(reader store.DataReader) *pausingOpenDataReader {
+	return &pausingOpenDataReader{DataReader: reader, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *pausingOpenDataReader) OpenSnapshot(ctx context.Context, request store.SnapshotRequest) (store.Snapshot, error) {
+	close(r.entered)
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	snapshot, err := r.DataReader.OpenSnapshot(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	tracked := &trackingSnapshot{Snapshot: snapshot}
+	r.mu.Lock()
+	r.opened = tracked
+	r.mu.Unlock()
+	return tracked, nil
+}
+
+func (r *pausingOpenDataReader) waitUntilOpen(t testing.TB) {
+	t.Helper()
+	select {
+	case <-r.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OpenSnapshot was not called")
+	}
+}
+
+func (r *pausingOpenDataReader) resumeOpen() { close(r.release) }
+
+func (r *pausingOpenDataReader) openedSnapshot() *trackingSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.opened
+}
+
+type trackingSnapshot struct {
+	store.Snapshot
+	closeCalls atomic.Int32
+}
+
+func (s *trackingSnapshot) Close() error {
+	s.closeCalls.Add(1)
+	return s.Snapshot.Close()
 }
 
 func (s *failingSnapshot) QueryTuples(ctx context.Context, query store.TupleQuery) (store.TupleResult, error) {

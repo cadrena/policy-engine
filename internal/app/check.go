@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"sort"
 	"time"
 
@@ -231,6 +230,9 @@ func (s *AuthorizationService) evaluatePinned(
 	if err != nil {
 		return policyengine.DecisionResult{}, err
 	}
+	if err := schema.ValidateContextualTuples(contextual); err != nil {
+		return policyengine.DecisionResult{}, err
+	}
 	contextual, err = schema.NormalizeContextualData(ctx, snapshot, contextual)
 	if err != nil {
 		return policyengine.DecisionResult{}, sanitizeRuntimeError(err, policyengine.ErrorInternal)
@@ -247,7 +249,7 @@ func (s *AuthorizationService) evaluatePinned(
 		Subject: request.Subject(), Resource: request.Resource(), Action: request.Action(), Arguments: arguments,
 	}, reader)
 	if err != nil {
-		return policyengine.DecisionResult{}, sanitizeRuntimeError(err, policyengine.ErrorFailedPrecondition)
+		return policyengine.DecisionResult{}, sanitizeEvaluationError(err)
 	}
 	decision, requirements, usedApproval, err := s.finalizeApproval(ctx, binding, request.ApprovalEvidence(), dslResult)
 	if err != nil {
@@ -326,17 +328,31 @@ func sanitizeRuntimeError(err error, fallback policyengine.ErrorCategory) error 
 	if err == nil {
 		return nil
 	}
-	var engineErr *policyengine.EngineError
-	if errors.As(err, &engineErr) {
+	if engineErr, ok := err.(*policyengine.EngineError); ok && engineErr != nil {
 		return appError(engineErr.Category())
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if err == context.DeadlineExceeded {
 		return appError(policyengine.ErrorDeadlineExceeded)
 	}
-	if errors.Is(err, context.Canceled) {
+	if err == context.Canceled {
 		return appError(policyengine.ErrorCanceled)
 	}
 	return appError(fallback)
+}
+
+func sanitizeEvaluationError(err error) error {
+	checkErr, ok := err.(*dsl.CheckError)
+	if !ok || checkErr == nil {
+		return sanitizeRuntimeError(err, policyengine.ErrorFailedPrecondition)
+	}
+	switch checkErr.Code {
+	case "E_CHECK_MAX_DEPTH":
+		return appError(policyengine.ErrorResourceExhausted)
+	case "E_CHECK_CONTEXT", "E_CHECK_TUPLE_READER":
+		return sanitizeRuntimeError(checkErr.Cause, policyengine.ErrorFailedPrecondition)
+	default:
+		return appError(policyengine.ErrorFailedPrecondition)
+	}
 }
 
 func checkFingerprint(request policyengine.CheckRequest) [sha256.Size]byte {
