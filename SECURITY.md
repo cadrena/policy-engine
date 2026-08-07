@@ -2,12 +2,16 @@
 
 ## 1. Supported versions and reporting
 
-Conductera Policy Engine is currently pre-V1. Security fixes apply to the latest
+Cadrena Policy Engine is currently pre-V1. Security fixes apply to the latest
 published release and the current development branch as stated by release
 notes. Unsupported versions may not receive fixes.
 
+The [Cadrena V1 capability matrix](../control-plane/docs/product/capability-matrix.md)
+is the normative ownership boundary for public and commercial security
+responsibilities.
+
 Do not open a public issue for a suspected vulnerability. Use GitHub Security
-Advisories for the public `conductera/policy-engine` repository. Include only:
+Advisories for the public `cadrena/policy-engine` repository. Include only:
 
 - the affected version or commit;
 - a minimal reproduction using synthetic policy and data;
@@ -38,7 +42,7 @@ execution on all engine errors and may classify that enforcement outcome as
 
 ## 3. Trust boundaries
 
-Policy source and encoded artifacts may be untrusted. The tagged Conductera DSL
+Policy source and encoded artifacts may be untrusted. The tagged Cadrena DSL
 must parse, validate, compile, canonicalize, and decode them under hard limits
 before they are stored or evaluated.
 

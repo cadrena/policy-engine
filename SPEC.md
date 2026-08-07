@@ -1,8 +1,10 @@
-# Conductera Policy Engine V1 Specification
+# Cadrena Policy Engine V1 Specification
 
 ## 1. Status and normative language
 
-This document defines the normative contract for Conductera Policy Engine V1.
+This document defines the normative contract for Cadrena Policy Engine V1. The
+cross-repository ownership contract is the
+[Cadrena V1 capability matrix](../control-plane/docs/product/capability-matrix.md).
 
 The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
 RECOMMENDED, NOT RECOMMENDED, MAY, and OPTIONAL in this document are to be
@@ -58,6 +60,11 @@ deterministic artifact encoding, compilation semantics, and graph and guard
 evaluation semantics. The engine owns local lifecycle, authorization-data
 orchestration, capability enforcement, storage, caching, transport mapping, and
 operational failure behavior.
+
+The compatibility-stable language-version identifier `conductera/v1` and
+evaluator-ABI identifier `conductera-evaluator/v1` are preserved for V1 wire
+compatibility. They are legacy protocol identifiers only, not current product
+or repository names.
 
 The engine MUST NOT duplicate DSL artifact encoding or compiler internals.
 Runtime-specific Go `Program` values are non-durable cache entries. Protobuf and

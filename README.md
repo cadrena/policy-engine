@@ -1,7 +1,10 @@
-# Conductera Policy Engine
+# Cadrena Policy Engine
 
-Conductera Policy Engine is an open-source, complete local policy runtime for
+Cadrena Policy Engine is an open-source, complete local policy runtime for
 relationship-based authorization of AI-agent and tool actions.
+
+The cross-repository ownership contract is the
+[Cadrena V1 capability matrix](../control-plane/docs/product/capability-matrix.md).
 
 > **Status:** Pre-V1 implementation. The Batch 1 decision core is available at
 > this source checkpoint on `codex/policy-engine-v1-runtime`, but it is not
@@ -35,7 +38,7 @@ promise; consult tagged release notes before relying on an API in production.
 ## V1 scope
 
 - Local relationship-based authorization for AI-agent and tool actions
-- Tagged Conductera textual DSL artifacts
+- Tagged Cadrena textual DSL artifacts
 - Embedded module-root Go API and standalone ConnectRPC server
 - `Check`, bounded snapshot-pinned `BatchCheck`, and privileged redacted
   `Explain`
@@ -43,7 +46,7 @@ promise; consult tagged release notes before relying on an API in production.
 - Persistent and contextual tuples plus typed attributes
 - Memory and SQLite storage
 - Bounded compiled-artifact and slot-pointer caching
-- Bounded local state events and privacy-safe metrics and traces
+- Bounded local state events and privacy-safe OpenTelemetry metrics and traces
 - Approval, delegation, caller-authorization, and decision-event extension
   ports
 - Reject-by-default evidence handling and privacy-safe telemetry
@@ -83,7 +86,7 @@ Connect, gRPC, and gRPC-Web; that transport remains in development.
 The canonical URL becomes reachable when the pre-V1 public DSL is published.
 -->
 
-Policies are authored in the Conductera textual DSL provided by tagged releases
+Policies are authored in the Cadrena textual DSL provided by tagged releases
 of [`github.com/cadrena/dsl`](https://github.com/cadrena/dsl). V1 does not
 execute CEL, Rego, JavaScript, Go plugins, WASM, or network-backed policy
 functions.

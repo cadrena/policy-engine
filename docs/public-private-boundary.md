@@ -2,10 +2,10 @@
 
 ## 1. Purpose and frozen invariant
 
-This document freezes the dependency and product boundary for Conductera Policy
+This document freezes the dependency and product boundary for Cadrena Policy
 Engine V1.
 
-> Conductera Policy Engine is a public local runtime. Commercial products may
+> Cadrena Policy Engine is a public local runtime. Commercial products may
 > compose it through tagged public APIs and extension ports, but public runtime
 > correctness and buildability never depend on commercial source, credentials,
 > services, or infrastructure.
@@ -38,29 +38,19 @@ Commercial products may implement public typed ports and consume public
 conformance suites. Composition is compile-time and one-way. The public runtime
 does not load runtime Go plugins or call a commercial service for correctness.
 
-## 3. Frozen capability matrix
+## 3. Normative capability ownership
 
-<!-- markdownlint-disable MD013 -->
+The cross-repository
+[Cadrena V1 capability matrix](../../control-plane/docs/product/capability-matrix.md)
+is the sole normative OSS/commercial ownership table.
 
-| Capability | Public V1 | Commercial or deferred | Boundary rule |
-| --- | --- | --- | --- |
-| DSL | Parser, AST, validation, deterministic versioned Artifact API | Organization-specific authoring workflows | Engine consumes a tagged public DSL |
-| Runtime | Embedded API, one evaluator core, Connect/gRPC/gRPC-Web, `Check`, bounded `BatchCheck`, privileged redacted `Explain` | Hosted and fleet composition | Commercial code composes; it does not replace the public evaluator |
-| Authorization data | Contextual and persistent tuples and typed attributes; atomic generation; memory and SQLite | Replication and scale-oriented adapters | Public store contract and conformance |
-| Policy lifecycle | Local immutable revision store and optional local CAS slot | Central registry, distribution, promotion, rollout, scheduling, drift management | Public lifecycle is local only |
-| Caching | Bounded compiled-artifact and slot-pointer caches; no final-decision cache | Distributed cache and coherence operations | Correctness never depends on invalidation delivery |
-| Approvals | Typed verifier port, evidence envelope, requirements, reject default | Issuance, workflow, registry, key service, revocation distribution | No bundled approval service |
-| Delegations | Typed verifier port, evidence envelope, reject default | Issuance, registry, lineage, attenuation service, revocation distribution | No bundled delegation service |
-| Explain, events, and telemetry | Redacted Explain, bounded local state events, privacy-safe telemetry, best-effort sink | Durable audit, search, retention, SIEM, compliance, forensic replay | Public does not claim durable audit |
-| Compatibility | Per-request and per-write validation against a loaded artifact | Dataset-wide scans, simulation, impact analysis | No public preflight scanner |
-| Operations | Local config, explicit SQLite migration and integrity, health, readiness, shutdown, image, quickstart | Managed backup and restore, HA, SSO, fleet, hosted operations | Public runtime remains independently usable |
-| Distribution | Public source, module, binary, and image | Commercial packaging | Public artifacts build without commercial access |
-| Extension model | Public typed ports and conformance suites | Proprietary adapters | Compile-time composition only; no runtime Go plugins |
-
-<!-- markdownlint-enable MD013 -->
-
-This matrix is exhaustive for V1 classification. A capability listed as
-commercial or deferred is not promised by the public V1 runtime.
+For the Policy Engine, Community OSS includes deterministic evaluation, memory
+and SQLite local policy state, typed approval and delegation verifier ports,
+local state events, and privacy-safe OpenTelemetry export. Approval or
+delegation issuance and registries, central policy activation, organizational
+durable audit and search, and managed operations are not public runtime
+capabilities. Local lifecycle and best-effort export do not reclassify those
+commercial responsibilities.
 
 ## 4. Safe public defaults
 
