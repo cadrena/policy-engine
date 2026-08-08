@@ -41,7 +41,7 @@ does not load runtime Go plugins or call a commercial service for correctness.
 ## 3. Normative capability ownership
 
 The cross-repository
-[Cadrena V1 capability matrix](../../control-plane/docs/product/capability-matrix.md)
+[Cadrena V1 capability matrix](./capability-matrix.md)
 is the sole normative OSS/commercial ownership table.
 
 For the Policy Engine, Community OSS includes deterministic evaluation, memory

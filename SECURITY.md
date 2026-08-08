@@ -6,7 +6,7 @@ Cadrena Policy Engine is currently pre-V1. Security fixes apply to the latest
 published release and the current development branch as stated by release
 notes. Unsupported versions may not receive fixes.
 
-The [Cadrena V1 capability matrix](../control-plane/docs/product/capability-matrix.md)
+The [Cadrena V1 capability matrix](./docs/capability-matrix.md)
 is the normative ownership boundary for public and commercial security
 responsibilities.
 

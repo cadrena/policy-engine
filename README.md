@@ -4,7 +4,7 @@ Cadrena Policy Engine is an open-source, complete local policy runtime for
 relationship-based authorization of AI-agent and tool actions.
 
 The cross-repository ownership contract is the
-[Cadrena V1 capability matrix](../control-plane/docs/product/capability-matrix.md).
+[Cadrena V1 capability matrix](./docs/capability-matrix.md).
 
 > **Status:** Pre-V1 implementation. The Batch 1 decision core is available at
 > this source checkpoint on `codex/policy-engine-v1-runtime`, but it is not
@@ -80,18 +80,10 @@ Connect, gRPC, and gRPC-Web; that transport remains in development.
 
 ## Policy language
 
-<!-- markdown-link-check-disable -->
-
-<!--
-The canonical URL becomes reachable when the pre-V1 public DSL is published.
--->
-
 Policies are authored in the Cadrena textual DSL provided by tagged releases
 of [`github.com/cadrena/dsl`](https://github.com/cadrena/dsl). V1 does not
 execute CEL, Rego, JavaScript, Go plugins, WASM, or network-backed policy
 functions.
-
-<!-- markdown-link-check-enable -->
 
 The tagged DSL owns parsing, validation, canonicalization, deterministic
 artifact encoding, compilation semantics, and graph and guard evaluation

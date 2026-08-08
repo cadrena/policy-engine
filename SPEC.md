@@ -4,7 +4,7 @@
 
 This document defines the normative contract for Cadrena Policy Engine V1. The
 cross-repository ownership contract is the
-[Cadrena V1 capability matrix](../control-plane/docs/product/capability-matrix.md).
+[Cadrena V1 capability matrix](./docs/capability-matrix.md).
 
 The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
 RECOMMENDED, NOT RECOMMENDED, MAY, and OPTIONAL in this document are to be
