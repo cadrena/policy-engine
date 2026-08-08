@@ -6,15 +6,14 @@ relationship-based authorization of AI-agent and tool actions.
 The cross-repository ownership contract is the
 [Cadrena V1 capability matrix](./docs/capability-matrix.md).
 
-> **Status:** Pre-V1 implementation. The Batch 1 decision core is available at
-> this source checkpoint on `codex/policy-engine-v1-runtime`, but it is not
-> published to main yet and there is no stable V1 tag. This README
-> distinguishes source availability from the frozen target V1 release
-> contract.
+> **Status:** Pre-V1 implementation. The Batch 1 decision core is available on
+> `main`, but SQLite, ConnectRPC, the standalone binary, the public image, and
+> `v1.0.0` remain in development. This README distinguishes source availability
+> from the frozen target V1 release contract.
 
 ## Current availability
 
-Available at this source checkpoint:
+Available on `main`:
 
 - the public module-root policy-engine contracts;
 - public composition through `embedded.New`;
@@ -28,8 +27,8 @@ Still in development:
 
 - SQLite storage;
 - the ConnectRPC transport and standalone binary;
-- the public container image;
-- the stable V1 tag and release artifacts.
+- the public image;
+- `v1.0.0` and its release artifacts.
 
 The contract below describes the complete target V1 surface. Source
 availability at a checkpoint is not a production-readiness or compatibility

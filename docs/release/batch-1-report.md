@@ -1,21 +1,23 @@
 # Policy Engine Batch 1 Report
 
+> **Superseded for current release status.** This report remains historical
+> evidence; use the [Batch R rebaseline report](../../../control-plane/docs/release/batch-r-report.md)
+> for the current release decision.
+
 ## Checkpoint status
 
 Batch 1 closes the public decision-core checkpoint. Memory-backed local policy
 lifecycle, authorization data, `Check`, snapshot-pinned `BatchCheck`, privileged
-redacted `Explain`, and embedded composition are available at this source
-checkpoint on `codex/policy-engine-v1-runtime`. This checkpoint is not
-published to main yet. It authorizes development of durable adapters and
-transports; it is not a stable V1 release.
+redacted `Explain`, and embedded composition are available on `main`. This
+checkpoint authorizes development of durable adapters and transports; it is
+not a stable V1 release.
 
-SQLite, ConnectRPC, the standalone binary, the public container image, and the
-stable V1 tag remain in development. No stable tag was created for this
-checkpoint.
+SQLite, ConnectRPC, the standalone binary, the public image, and `v1.0.0`
+remain in development. No stable tag was created for this checkpoint.
 
-Landing is explicitly excluded from Batch 1 and was not modified. Batch 0
-release readiness remains blocked only by its separate landing contract; that
-does not block this Policy Engine source checkpoint.
+Landing was explicitly excluded from Batch 1 and was not modified by it. Batch
+R subsequently cleared the separate Batch 0 landing block; the superseding
+report records that evidence and current decision.
 
 ## Public package and dependency boundary
 
