@@ -82,9 +82,10 @@ type EvidenceBindingInput struct {
 	Fingerprint    EvidenceFingerprint
 }
 
-// EvidenceBinding binds opaque evidence to one exact pinned evaluation. For
-// BatchCheck, Fingerprint MUST cover the complete ordered batch, including every
-// item semantic; it is never an item-level or reusable cross-batch fingerprint.
+// EvidenceBinding binds opaque evidence to one exact pinned evaluation. Its
+// fingerprint scope depends on the verifier: delegation verification uses the
+// whole request (the complete ordered batch for BatchCheck), while approval
+// verification uses the individual item's effective evaluation scope.
 type EvidenceBinding struct {
 	caller         CallerBinding
 	namespace      string
@@ -154,7 +155,9 @@ func (b EvidenceBinding) DataGeneration() uint64 { return b.dataGeneration }
 // EvaluatedAt returns the single captured evaluation time.
 func (b EvidenceBinding) EvaluatedAt() time.Time { return b.evaluatedAt }
 
-// Fingerprint returns the fixed-size complete request or ordered-batch fingerprint.
+// Fingerprint returns the fixed-size scope-specific fingerprint: the complete
+// request or ordered batch for delegation verification, or the individual
+// item's effective evaluation for approval verification.
 func (b EvidenceBinding) Fingerprint() EvidenceFingerprint { return b.fingerprint }
 
 // AuthorizationDigest returns a stable approval-continuation binding. It omits
