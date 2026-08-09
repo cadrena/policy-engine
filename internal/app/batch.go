@@ -22,14 +22,15 @@ type evaluationSession struct {
 	reader         *evaluator.SnapshotReader
 	close          func() error
 
-	binding            policyengine.EvidenceBinding
-	usedContextualData bool
-	usedDelegation     bool
-	approvalEvidence   []byte
-	tupleReader        dsl.TupleReader
-	verifierBudget     *batchWorkBudget
-	graphBudget        *batchWorkBudget
-	batch              bool
+	binding                     policyengine.EvidenceBinding
+	effectiveContextFingerprint [sha256.Size]byte
+	usedContextualData          bool
+	usedDelegation              bool
+	approvalEvidence            []byte
+	tupleReader                 dsl.TupleReader
+	verifierBudget              *batchWorkBudget
+	graphBudget                 *batchWorkBudget
+	batch                       bool
 }
 
 type sharedEvaluationRequest interface {
@@ -219,10 +220,45 @@ func (s *AuthorizationService) openEvaluationSession(
 		revisionID: pin.revisionID, slotGeneration: pin.slotGeneration,
 		dataGeneration: snapshot.Generation(), evaluatedAt: evaluatedAt,
 		program: hydrated.Program(), artifact: hydrated.Artifact(), reader: reader, close: snapshot.Close,
-		binding:            binding,
-		usedContextualData: usedContextualData, usedDelegation: usedDelegation,
+		binding:                     binding,
+		effectiveContextFingerprint: fingerprintEffectiveContext(contextual),
+		usedContextualData:          usedContextualData, usedDelegation: usedDelegation,
 		approvalEvidence: request.ApprovalEvidence(), tupleReader: reader, verifierBudget: verifierBudget,
 	}, nil
+}
+
+func fingerprintEffectiveContext(contextual policyengine.ContextualData) [sha256.Size]byte {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("cadrena.approval.effective-context.v1"))
+	tuples := contextual.Tuples()
+	attributes := contextual.Attributes()
+	writeFingerprintUint64(hash, uint64(len(tuples)))
+	for _, tuple := range tuples {
+		value := tuple.Tuple()
+		writeEntityFingerprint(hash, value.Resource)
+		writeFingerprintString(hash, value.Relation)
+		writeFingerprintString(hash, value.Subject.Type)
+		writeFingerprintString(hash, value.Subject.ID)
+		writeFingerprintString(hash, value.Subject.Relation)
+		if expiry, ok := tuple.ExpiresAt(); ok {
+			writeFingerprintString(hash, expiry.UTC().Format(time.RFC3339Nano))
+		} else {
+			writeFingerprintString(hash, "")
+		}
+	}
+	writeFingerprintUint64(hash, uint64(len(attributes)))
+	for _, attribute := range attributes {
+		writeEntityFingerprint(hash, attribute.Entity())
+		path := attribute.Path()
+		writeFingerprintUint64(hash, uint64(len(path)))
+		for _, segment := range path {
+			writeFingerprintString(hash, segment)
+		}
+		writeValueFingerprint(hash, attribute.Value())
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest
 }
 
 func batchFingerprint(request policyengine.BatchCheckRequest) [sha256.Size]byte {

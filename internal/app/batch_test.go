@@ -167,6 +167,62 @@ func TestBatchCheckDelegationUsesOneCompleteOrderedBatchBinding(t *testing.T) {
 	}
 }
 
+func TestBatchApprovalContinuationIsPerItem(t *testing.T) {
+	fixture, verifier := newApprovalCaptureService(t)
+	service := fixture.newService(t, verifier, policyengine.DefaultDelegationVerifier(), policyengine.DefaultDecisionEventSink(), fixture.adapter)
+	response, err := service.BatchCheck(context.Background(), mustCaller(t), twoApprovalItemBatch(t, fixture))
+	requireNoError(t, err)
+	results := response.Results()
+	first, firstOK := results[0].ApprovalBindingDigest()
+	second, secondOK := results[1].ApprovalBindingDigest()
+	if !firstOK || !secondOK || first == second {
+		t.Fatalf("per-item digests = %x/%t %x/%t", first, firstOK, second, secondOK)
+	}
+	bindings := verifier.Bindings()
+	if len(bindings) != 2 {
+		t.Fatalf("approval verifier bindings = %d", len(bindings))
+	}
+	for i := range bindings {
+		got, ok := bindings[i].AuthorizationDigest()
+		if !ok || got != mustApprovalDigest(t, results[i]) {
+			t.Fatalf("item %d verifier/result binding mismatch", i)
+		}
+	}
+}
+
+func TestBatchApprovalContinuationKeepsDelegationBindingWholeAndItemsIndependent(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	revision := publishSource(context.Background(), t, fixture.policyService, mustCaller(t), "approval.cdr", approvalCheckSource).Revision().ID()
+	fixture.activate(t, revision)
+
+	firstApproval := &approvalCaptureVerifier{}
+	firstDelegation := &delegationCaptureVerifier{}
+	firstService := fixture.newService(t, firstApproval, firstDelegation, policyengine.DefaultDecisionEventSink(), fixture.adapter)
+	firstResponse, err := firstService.BatchCheck(context.Background(), mustCaller(t), approvalItemBatch(t, fixture, "doc-1", "doc-2", []byte("delegation")))
+	requireNoError(t, err)
+	firstDelegationBindings := firstDelegation.Bindings()
+	if len(firstDelegationBindings) != 1 {
+		t.Fatalf("delegation verifier bindings = %d, want 1 complete-batch binding", len(firstDelegationBindings))
+	}
+
+	retryApproval := &approvalCaptureVerifier{}
+	retryDelegation := &delegationCaptureVerifier{}
+	retryService := fixture.newService(t, retryApproval, retryDelegation, policyengine.DefaultDecisionEventSink(), fixture.adapter)
+	retryResponse, err := retryService.BatchCheck(context.Background(), mustCaller(t), approvalItemBatch(t, fixture, "doc-1", "doc-3", []byte("delegation")))
+	requireNoError(t, err)
+	retryDelegationBindings := retryDelegation.Bindings()
+	if len(retryDelegationBindings) != 1 {
+		t.Fatalf("retry delegation verifier bindings = %d, want 1 complete-batch binding", len(retryDelegationBindings))
+	}
+
+	if got, want := mustApprovalDigest(t, retryResponse.Results()[0]), mustApprovalDigest(t, firstResponse.Results()[0]); got != want {
+		t.Fatalf("unrelated neighbor changed first approval digest = %x, want %x", got, want)
+	}
+	if firstDelegationBindings[0].Fingerprint().Bytes() == retryDelegationBindings[0].Fingerprint().Bytes() {
+		t.Fatal("delegation verifier no longer received a complete ordered-batch binding")
+	}
+}
+
 func TestBatchCheckAdditivelyMergesValidDirectAndDelegatedContextualData(t *testing.T) {
 	fixture := newAuthorizationFixture(t)
 	fixture.activate(t, fixture.allowRevision)
@@ -322,6 +378,77 @@ func (f *authorizationFixture) batchRequestWithDelegation(t testing.TB, evidence
 	})
 	requireNoError(t, err)
 	return request
+}
+
+func newApprovalCaptureService(t testing.TB) (*authorizationFixture, *approvalCaptureVerifier) {
+	t.Helper()
+	fixture := newAuthorizationFixture(t)
+	revision := publishSource(context.Background(), t, fixture.policyService, mustCaller(t), "approval.cdr", approvalCheckSource).Revision().ID()
+	fixture.activate(t, revision)
+	return fixture, &approvalCaptureVerifier{}
+}
+
+func twoApprovalItemBatch(t testing.TB, fixture *authorizationFixture) policyengine.BatchCheckRequest {
+	t.Helper()
+	return approvalItemBatch(t, fixture, "doc-1", "doc-2", nil)
+}
+
+func approvalItemBatch(t testing.TB, fixture *authorizationFixture, firstID, secondID string, delegationEvidence []byte) policyengine.BatchCheckRequest {
+	t.Helper()
+	check := fixture.checkRequest(t)
+	items := make([]policyengine.BatchCheckItem, 2)
+	for index, resourceID := range []string{firstID, secondID} {
+		resource := check.Resource()
+		resource.ID = resourceID
+		item, err := policyengine.NewBatchCheckItem(check.Subject(), resource, check.Action(), check.Arguments())
+		requireNoError(t, err)
+		items[index] = item
+	}
+	contextual := approvalContextualData(t)
+	request, err := policyengine.NewBatchCheckRequest(policyengine.BatchCheckRequestInput{
+		Namespace: check.Namespace(), Selector: check.Selector(), Items: items,
+		ContextualData: contextual, ApprovalEvidence: []byte("approval-token"), DelegationEvidence: delegationEvidence,
+	})
+	requireNoError(t, err)
+	return request
+}
+
+func approvalContextualData(t testing.TB) policyengine.ContextualData {
+	t.Helper()
+	tuples := make([]policyengine.RelationshipTuple, 0, 3)
+	for _, resourceID := range []string{"doc-1", "doc-2", "doc-3"} {
+		tuple, err := policyengine.NewRelationshipTuple(dsl.Tuple{
+			Resource: dsl.EntityRef{Type: "document", ID: resourceID}, Relation: "viewer",
+			Subject: dsl.SubjectRef{Type: "user", ID: "alice"},
+		}, nil)
+		requireNoError(t, err)
+		tuples = append(tuples, tuple)
+	}
+	contextual, err := policyengine.NewContextualData(tuples, nil)
+	requireNoError(t, err)
+	return contextual
+}
+
+type delegationCaptureVerifier struct {
+	mu       sync.Mutex
+	bindings []policyengine.EvidenceBinding
+}
+
+func (v *delegationCaptureVerifier) VerifyDelegation(_ context.Context, request policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error) {
+	v.mu.Lock()
+	v.bindings = append(v.bindings, request.Binding())
+	v.mu.Unlock()
+	contextual, err := policyengine.NewContextualData(nil, nil)
+	if err != nil {
+		return policyengine.DelegationVerificationResult{}, err
+	}
+	return policyengine.NewDelegationVerificationResult(contextual)
+}
+
+func (v *delegationCaptureVerifier) Bindings() []policyengine.EvidenceBinding {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]policyengine.EvidenceBinding(nil), v.bindings...)
 }
 
 type cancelingDataReader struct {

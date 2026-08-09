@@ -157,6 +157,28 @@ func (b EvidenceBinding) EvaluatedAt() time.Time { return b.evaluatedAt }
 // Fingerprint returns the fixed-size complete request or ordered-batch fingerprint.
 func (b EvidenceBinding) Fingerprint() EvidenceFingerprint { return b.fingerprint }
 
+// AuthorizationDigest returns a stable approval-continuation binding. It omits
+// evaluation time so a retry against the same authority remains resumable.
+func (b EvidenceBinding) AuthorizationDigest() ([sha256.Size]byte, bool) {
+	if !b.valid() {
+		return [sha256.Size]byte{}, false
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("cadrena.approval.authorization.v1"))
+	caller := b.caller.Bytes()
+	fingerprint := b.fingerprint.Bytes()
+	_, _ = hash.Write(caller[:])
+	writeBoundField(hash, b.namespace)
+	writeSelectorBinding(hash, b.selector)
+	writeBoundField(hash, b.revisionID)
+	writeBoundUint64(hash, b.slotGeneration)
+	writeBoundUint64(hash, b.dataGeneration)
+	_, _ = hash.Write(fingerprint[:])
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest, true
+}
+
 func (b EvidenceBinding) valid() bool {
 	if !b.validBinding || !b.caller.isValid() || !validNamespace(b.namespace) || !b.selector.valid() || !validRevisionIDString(b.revisionID) || b.evaluatedAt.IsZero() || !b.fingerprint.isValid() {
 		return false
@@ -177,4 +199,21 @@ func writeBoundField(hash interface{ Write([]byte) (int, error) }, value string)
 	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
 	_, _ = hash.Write(size[:])
 	_, _ = hash.Write([]byte(value))
+}
+
+func writeBoundUint64(hash interface{ Write([]byte) (int, error) }, value uint64) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], value)
+	_, _ = hash.Write(encoded[:])
+}
+
+func writeSelectorBinding(hash interface{ Write([]byte) (int, error) }, selector Selector) {
+	if slot, ok := selector.Slot(); ok {
+		writeBoundField(hash, "slot")
+		writeBoundField(hash, slot)
+		return
+	}
+	revision, _ := selector.ExactRevision()
+	writeBoundField(hash, "revision")
+	writeBoundField(hash, revision)
 }

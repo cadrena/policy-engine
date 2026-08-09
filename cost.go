@@ -1,6 +1,10 @@
 package policyengine
 
-import "github.com/cadrena/dsl"
+import (
+	"crypto/sha256"
+
+	"github.com/cadrena/dsl"
+)
 
 const (
 	// Aggregate costs count exact dynamic bytes plus deterministic conservative
@@ -280,16 +284,22 @@ func addDecisionResultCost(budget *budgetCounter, input DecisionResultInput) err
 			return err
 		}
 	}
+	if input.ApprovalBindingDigest != ([sha256.Size]byte{}) {
+		if err := addFixedFieldCost(budget, sha256.Size); err != nil {
+			return err
+		}
+	}
 	return addIdentifiersCost(budget, input.Requirements)
 }
 
 func addDecisionResultValueCost(budget *budgetCounter, result DecisionResult) error {
 	return addDecisionResultCost(budget, DecisionResultInput{
-		Decision:     result.decision,
-		DecisionID:   result.decisionID,
-		ReasonCode:   result.reasonCode,
-		RevisionID:   result.revisionID,
-		Requirements: result.requirements,
+		Decision:              result.decision,
+		DecisionID:            result.decisionID,
+		ReasonCode:            result.reasonCode,
+		RevisionID:            result.revisionID,
+		Requirements:          result.requirements,
+		ApprovalBindingDigest: result.approvalBindingDigest,
 	})
 }
 

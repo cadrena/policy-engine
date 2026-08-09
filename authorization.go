@@ -1,6 +1,7 @@
 package policyengine
 
 import (
+	"crypto/sha256"
 	"time"
 
 	"github.com/cadrena/dsl"
@@ -157,33 +158,36 @@ func (r CheckRequest) valid() bool {
 
 // DecisionResultInput contains compact metadata copied by NewDecisionResult.
 type DecisionResultInput struct {
-	Decision           Decision
-	DecisionID         string
-	ReasonCode         string
-	RevisionID         string
-	SlotGeneration     uint64
-	DataGeneration     uint64
-	EvaluatedAt        time.Time
-	Requirements       []string
-	UsedContextualData bool
-	UsedApproval       bool
-	UsedDelegation     bool
+	Decision              Decision
+	DecisionID            string
+	ReasonCode            string
+	RevisionID            string
+	SlotGeneration        uint64
+	DataGeneration        uint64
+	EvaluatedAt           time.Time
+	Requirements          []string
+	ApprovalBindingDigest [sha256.Size]byte
+	UsedContextualData    bool
+	UsedApproval          bool
+	UsedDelegation        bool
 }
 
 // DecisionResult is one immutable successful policy result with compact metadata.
 type DecisionResult struct {
-	validResult        bool
-	decision           Decision
-	decisionID         string
-	reasonCode         string
-	revisionID         string
-	slotGeneration     uint64
-	dataGeneration     uint64
-	evaluatedAt        time.Time
-	requirements       []string
-	usedContextualData bool
-	usedApproval       bool
-	usedDelegation     bool
+	validResult           bool
+	decision              Decision
+	decisionID            string
+	reasonCode            string
+	revisionID            string
+	slotGeneration        uint64
+	dataGeneration        uint64
+	evaluatedAt           time.Time
+	requirements          []string
+	approvalBindingDigest [sha256.Size]byte
+	hasApprovalBinding    bool
+	usedContextualData    bool
+	usedApproval          bool
+	usedDelegation        bool
 }
 
 // NewDecisionResult validates and constructs one compact policy result.
@@ -214,19 +218,25 @@ func NewDecisionResult(input DecisionResultInput) (DecisionResult, error) {
 	if input.Decision == DecisionRequireApproval && len(requirements) == 0 {
 		return DecisionResult{}, invalidArgument("require-approval decision requires requirements")
 	}
+	hasApprovalBinding := input.ApprovalBindingDigest != ([sha256.Size]byte{})
+	if (input.Decision == DecisionRequireApproval) != hasApprovalBinding {
+		return DecisionResult{}, invalidArgument("approval binding digest does not match decision")
+	}
 	return DecisionResult{
-		validResult:        true,
-		decision:           input.Decision,
-		decisionID:         input.DecisionID,
-		reasonCode:         input.ReasonCode,
-		revisionID:         input.RevisionID,
-		slotGeneration:     input.SlotGeneration,
-		dataGeneration:     input.DataGeneration,
-		evaluatedAt:        input.EvaluatedAt,
-		requirements:       requirements,
-		usedContextualData: input.UsedContextualData,
-		usedApproval:       input.UsedApproval,
-		usedDelegation:     input.UsedDelegation,
+		validResult:           true,
+		decision:              input.Decision,
+		decisionID:            input.DecisionID,
+		reasonCode:            input.ReasonCode,
+		revisionID:            input.RevisionID,
+		slotGeneration:        input.SlotGeneration,
+		dataGeneration:        input.DataGeneration,
+		evaluatedAt:           input.EvaluatedAt,
+		requirements:          requirements,
+		approvalBindingDigest: input.ApprovalBindingDigest,
+		hasApprovalBinding:    hasApprovalBinding,
+		usedContextualData:    input.UsedContextualData,
+		usedApproval:          input.UsedApproval,
+		usedDelegation:        input.UsedDelegation,
 	}, nil
 }
 
@@ -254,6 +264,15 @@ func (r DecisionResult) EvaluatedAt() time.Time { return r.evaluatedAt }
 // Requirements returns sorted unique unsatisfied approval requirement IDs.
 func (r DecisionResult) Requirements() []string { return cloneSlice(r.requirements) }
 
+// ApprovalBindingDigest returns the continuation binding for require-approval
+// decisions only.
+func (r DecisionResult) ApprovalBindingDigest() ([sha256.Size]byte, bool) {
+	if r.decision != DecisionRequireApproval || !r.hasApprovalBinding {
+		return [sha256.Size]byte{}, false
+	}
+	return r.approvalBindingDigest, true
+}
+
 // UsedContextualData reports whether contextual facts were evaluated.
 func (r DecisionResult) UsedContextualData() bool { return r.usedContextualData }
 
@@ -268,6 +287,10 @@ func (r DecisionResult) valid() bool {
 		return false
 	}
 	if !validCanonicalIdentifiers(r.requirements, MaxVerifierOutputItems, MaxAggregateOutputBytes) {
+		return false
+	}
+	hasApprovalDigest := r.approvalBindingDigest != ([sha256.Size]byte{})
+	if r.hasApprovalBinding != hasApprovalDigest || (r.decision == DecisionRequireApproval) != r.hasApprovalBinding {
 		return false
 	}
 	byteBudget := budgetCounter{max: MaxAggregateOutputBytes}

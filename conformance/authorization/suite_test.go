@@ -19,12 +19,14 @@ func TestEmbeddedEngineAuthorizationConformance(t *testing.T) {
 		storage, err := memory.New()
 		requireNoError(t, err)
 		controlled := &controlledStore{Store: storage, counters: &pauses}
+		approval := &approvalBindingCapture{}
 		engine, err := embedded.New(
 			embedded.WithStore(controlled),
 			embedded.WithCallerAuthorizer(conformanceAuthorizer{}),
+			embedded.WithApprovalVerifier(approval),
 		)
 		requireNoError(t, err)
-		return &controlledEngine{Engine: engine, store: controlled}
+		return &controlledEngine{Engine: engine, store: controlled, approval: approval}
 	})
 	if pauses.revision.Load() == 0 || pauses.snapshot.Load() == 0 {
 		t.Fatal("authorization conformance did not exercise deterministic pin pauses")
@@ -106,7 +108,8 @@ func (s *controlledStore) OpenSnapshot(ctx context.Context, request store.Snapsh
 
 type controlledEngine struct {
 	policyengine.Engine
-	store *controlledStore
+	store    *controlledStore
+	approval *approvalBindingCapture
 }
 
 func (e *controlledEngine) PauseNextRevisionLoad() (<-chan struct{}, func()) {
@@ -115,6 +118,28 @@ func (e *controlledEngine) PauseNextRevisionLoad() (<-chan struct{}, func()) {
 
 func (e *controlledEngine) PauseNextSnapshotOpen() (<-chan struct{}, func()) {
 	return e.store.armSnapshot()
+}
+
+func (e *controlledEngine) ApprovalBindings() []policyengine.EvidenceBinding {
+	return e.approval.Bindings()
+}
+
+type approvalBindingCapture struct {
+	mu       sync.Mutex
+	bindings []policyengine.EvidenceBinding
+}
+
+func (c *approvalBindingCapture) VerifyApproval(_ context.Context, request policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error) {
+	c.mu.Lock()
+	c.bindings = append(c.bindings, request.Binding())
+	c.mu.Unlock()
+	return policyengine.NewApprovalVerificationResult(nil)
+}
+
+func (c *approvalBindingCapture) Bindings() []policyengine.EvidenceBinding {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]policyengine.EvidenceBinding(nil), c.bindings...)
 }
 
 type conformanceAuthorizer struct{}

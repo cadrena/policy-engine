@@ -393,7 +393,7 @@ func TestPublicConstructorsUseSharedNamespaceAndIdentifierValidation(t *testing.
 			return err
 		}},
 		{"decision requirement", func() error {
-			_, err := policyengine.NewDecisionResult(policyengine.DecisionResultInput{Decision: policyengine.DecisionRequireApproval, DecisionID: "decision", ReasonCode: "APPROVAL", RevisionID: revisionID, SlotGeneration: 1, EvaluatedAt: now, Requirements: []string{unsafeIdentifier}})
+			_, err := policyengine.NewDecisionResult(policyengine.DecisionResultInput{Decision: policyengine.DecisionRequireApproval, DecisionID: "decision", ReasonCode: "APPROVAL", RevisionID: revisionID, SlotGeneration: 1, EvaluatedAt: now, Requirements: []string{unsafeIdentifier}, ApprovalBindingDigest: [32]byte{1}})
 			return err
 		}},
 		{"completed event reason", func() error {

@@ -211,13 +211,14 @@ func TestSecuritySensitiveExportedValuesRedactGenericFormattingAndSlog(t *testin
 		t.Fatal(err)
 	}
 	decisionInput := policyengine.DecisionResultInput{
-		Decision:       policyengine.DecisionRequireApproval,
-		DecisionID:     "decision-id-canary-bba5",
-		ReasonCode:     "APPROVAL_REQUIRED",
-		RevisionID:     revisionID,
-		SlotGeneration: 1,
-		EvaluatedAt:    now,
-		Requirements:   []string{"decision-requirement-canary-b38c"},
+		Decision:              policyengine.DecisionRequireApproval,
+		DecisionID:            "decision-id-canary-bba5",
+		ReasonCode:            "APPROVAL_REQUIRED",
+		RevisionID:            revisionID,
+		SlotGeneration:        1,
+		EvaluatedAt:           now,
+		Requirements:          []string{"decision-requirement-canary-b38c"},
+		ApprovalBindingDigest: [32]byte{1},
 	}
 	decisionResult, err := policyengine.NewDecisionResult(decisionInput)
 	if err != nil {

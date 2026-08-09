@@ -127,6 +127,31 @@ func TestCheckRequiresAndVerifiesApprovalEvidence(t *testing.T) {
 	}
 }
 
+func TestCheckApprovalContinuationDigestIsStableAcrossRetries(t *testing.T) {
+	fixture := newAuthorizationFixture(t)
+	revision := publishSource(context.Background(), t, fixture.policyService, mustCaller(t), "approval.cdr", approvalCheckSource).Revision().ID()
+	fixture.activate(t, revision)
+	request := withApprovalEvidence(t, fixture.checkRequest(t), []byte("approval-token"))
+
+	firstVerifier := &approvalCaptureVerifier{}
+	firstService := fixture.newServiceWithClock(t, firstVerifier, policyengine.DefaultDelegationVerifier(), policyengine.DefaultDecisionEventSink(), fixture.adapter, time.Unix(100, 0).UTC())
+	firstResponse, err := firstService.Check(context.Background(), mustCaller(t), request)
+	requireNoError(t, err)
+	firstResult := firstResponse.Result()
+	assertApprovalVerifierMatchesResult(t, firstVerifier, firstResult)
+
+	retryVerifier := &approvalCaptureVerifier{}
+	retryService := fixture.newServiceWithClock(t, retryVerifier, policyengine.DefaultDelegationVerifier(), policyengine.DefaultDecisionEventSink(), fixture.adapter, time.Unix(160, 0).UTC())
+	retryResponse, err := retryService.Check(context.Background(), mustCaller(t), request)
+	requireNoError(t, err)
+	retryResult := retryResponse.Result()
+	assertApprovalVerifierMatchesResult(t, retryVerifier, retryResult)
+
+	if got, want := mustApprovalDigest(t, retryResult), mustApprovalDigest(t, firstResult); got != want {
+		t.Fatalf("retry approval digest = %x, want %x", got, want)
+	}
+}
+
 func TestCheckDelegationEvidenceIsExactlyBoundAndRejectsByDefault(t *testing.T) {
 	fixture := newAuthorizationFixture(t)
 	fixture.activate(t, fixture.allowRevision)
@@ -428,6 +453,10 @@ func newAuthorizationFixture(t testing.TB) *authorizationFixture {
 }
 
 func (f *authorizationFixture) newService(t testing.TB, approval policyengine.ApprovalVerifier, delegation policyengine.DelegationVerifier, sink policyengine.DecisionEventSink, data store.DataReader) *app.AuthorizationService {
+	return f.newServiceWithClock(t, approval, delegation, sink, data, time.Unix(100, 0).UTC())
+}
+
+func (f *authorizationFixture) newServiceWithClock(t testing.TB, approval policyengine.ApprovalVerifier, delegation policyengine.DelegationVerifier, sink policyengine.DecisionEventSink, data store.DataReader, now time.Time) *app.AuthorizationService {
 	t.Helper()
 	revisionCache, err := cache.NewRevisionCache(cache.RevisionLimits{MaxEntries: 8, MaxBytes: 1 << 20})
 	requireNoError(t, err)
@@ -436,7 +465,7 @@ func (f *authorizationFixture) newService(t testing.TB, approval policyengine.Ap
 	service, err := app.NewAuthorizationService(app.AuthorizationDependencies{
 		Revisions: f.adapter, Slots: f.adapter, Data: data, RevisionCache: revisionCache,
 		PointerCache: pointerCache, CallerAuthorizer: allowAuthorizer{}, ApprovalVerifier: approval,
-		DelegationVerifier: delegation, DecisionSink: sink, Clock: func() time.Time { return time.Unix(100, 0).UTC() },
+		DelegationVerifier: delegation, DecisionSink: sink, Clock: func() time.Time { return now },
 	})
 	requireNoError(t, err)
 	return service
@@ -567,6 +596,45 @@ type approvalVerifierFunc func(context.Context, policyengine.ApprovalVerificatio
 
 func (f approvalVerifierFunc) VerifyApproval(ctx context.Context, request policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error) {
 	return f(ctx, request)
+}
+
+type approvalCaptureVerifier struct {
+	mu       sync.Mutex
+	bindings []policyengine.EvidenceBinding
+}
+
+func (v *approvalCaptureVerifier) VerifyApproval(_ context.Context, request policyengine.ApprovalVerificationRequest) (policyengine.ApprovalVerificationResult, error) {
+	v.mu.Lock()
+	v.bindings = append(v.bindings, request.Binding())
+	v.mu.Unlock()
+	return policyengine.NewApprovalVerificationResult(nil)
+}
+
+func (v *approvalCaptureVerifier) Bindings() []policyengine.EvidenceBinding {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]policyengine.EvidenceBinding(nil), v.bindings...)
+}
+
+func mustApprovalDigest(t testing.TB, result policyengine.DecisionResult) [32]byte {
+	t.Helper()
+	digest, ok := result.ApprovalBindingDigest()
+	if !ok {
+		t.Fatal("require-approval result has no approval digest")
+	}
+	return digest
+}
+
+func assertApprovalVerifierMatchesResult(t testing.TB, verifier *approvalCaptureVerifier, result policyengine.DecisionResult) {
+	t.Helper()
+	bindings := verifier.Bindings()
+	if len(bindings) != 1 {
+		t.Fatalf("approval verifier bindings = %d", len(bindings))
+	}
+	got, ok := bindings[0].AuthorizationDigest()
+	if !ok || got != mustApprovalDigest(t, result) {
+		t.Fatal("approval verifier/result binding mismatch")
+	}
 }
 
 type delegationVerifierFunc func(context.Context, policyengine.DelegationVerificationRequest) (policyengine.DelegationVerificationResult, error)

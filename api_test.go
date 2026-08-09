@@ -327,16 +327,17 @@ func TestAuthorizationResponseValuesAreBoundedAndImmutable(t *testing.T) {
 	requirements := []string{"manager", "admin", "manager"}
 	now := time.Date(2026, time.July, 29, 12, 0, 0, 0, time.UTC)
 	result, err := policyengine.NewDecisionResult(policyengine.DecisionResultInput{
-		Decision:           policyengine.DecisionRequireApproval,
-		DecisionID:         "decision-1",
-		ReasonCode:         "APPROVAL_REQUIRED",
-		RevisionID:         testRevisionID(t),
-		SlotGeneration:     2,
-		DataGeneration:     4,
-		EvaluatedAt:        now,
-		Requirements:       requirements,
-		UsedContextualData: true,
-		UsedApproval:       true,
+		Decision:              policyengine.DecisionRequireApproval,
+		DecisionID:            "decision-1",
+		ReasonCode:            "APPROVAL_REQUIRED",
+		RevisionID:            testRevisionID(t),
+		SlotGeneration:        2,
+		DataGeneration:        4,
+		EvaluatedAt:           now,
+		Requirements:          requirements,
+		ApprovalBindingDigest: [32]byte{1},
+		UsedContextualData:    true,
+		UsedApproval:          true,
 	})
 	if err != nil {
 		t.Fatalf("NewDecisionResult() error = %v", err)
@@ -352,6 +353,9 @@ func TestAuthorizationResponseValuesAreBoundedAndImmutable(t *testing.T) {
 	}
 	if result.Decision() != policyengine.DecisionRequireApproval || result.Decision().String() != "REQUIRE_APPROVAL" {
 		t.Fatalf("Decision() = %v", result.Decision())
+	}
+	if digest, ok := result.ApprovalBindingDigest(); !ok || digest != ([32]byte{1}) {
+		t.Fatalf("ApprovalBindingDigest() = %x, %t", digest, ok)
 	}
 	if policyengine.DecisionAllow.String() != "ALLOW" || policyengine.DecisionDeny.String() != "DENY" {
 		t.Fatal("public decision constants are not stable")

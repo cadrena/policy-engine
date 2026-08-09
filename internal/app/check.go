@@ -213,26 +213,46 @@ func (s *AuthorizationService) evaluateSessionItemWithTrace(
 			return policyengine.DecisionResult{}, nil, err
 		}
 	}
-	decision, requirements, usedApproval, err := s.finalizeApproval(ctx, session.binding, session.approvalEvidence, dslResult, session.verifierBudget)
+	itemBinding, err := policyengine.NewEvidenceBinding(policyengine.EvidenceBindingInput{
+		Caller: session.binding.Caller(), Namespace: session.binding.Namespace(),
+		Selector: session.binding.Selector(), RevisionID: session.revisionID,
+		SlotGeneration: session.slotGeneration, DataGeneration: session.dataGeneration,
+		EvaluatedAt: session.evaluatedAt,
+		Fingerprint: policyengine.NewEvidenceFingerprint(approvalItemFingerprint(
+			subject, resource, action, inputArguments, session.effectiveContextFingerprint, session.usedDelegation,
+		)),
+	})
+	if err != nil {
+		return policyengine.DecisionResult{}, nil, appError(policyengine.ErrorInternal)
+	}
+	decision, requirements, usedApproval, err := s.finalizeApproval(ctx, itemBinding, session.approvalEvidence, dslResult, session.verifierBudget)
 	if err != nil {
 		return policyengine.DecisionResult{}, nil, err
 	}
-	itemFingerprint := sha256.New()
-	batchBinding := session.binding.Fingerprint().Bytes()
-	_, _ = itemFingerprint.Write(batchBinding[:])
-	if session.batch {
-		writeEntityFingerprint(itemFingerprint, subject)
-		writeEntityFingerprint(itemFingerprint, resource)
-		writeFingerprintString(itemFingerprint, action)
-		writeArgumentsFingerprint(itemFingerprint, inputArguments)
+	var approvalBindingDigest [sha256.Size]byte
+	if decision == policyengine.DecisionRequireApproval {
+		var ok bool
+		approvalBindingDigest, ok = itemBinding.AuthorizationDigest()
+		if !ok {
+			return policyengine.DecisionResult{}, nil, appError(policyengine.ErrorInternal)
+		}
 	}
-	_, _ = itemFingerprint.Write([]byte{byte(decision)})
-	decisionDigest := itemFingerprint.Sum(nil)
+	decisionFingerprint := sha256.New()
+	batchBinding := session.binding.Fingerprint().Bytes()
+	_, _ = decisionFingerprint.Write(batchBinding[:])
+	if session.batch {
+		writeEntityFingerprint(decisionFingerprint, subject)
+		writeEntityFingerprint(decisionFingerprint, resource)
+		writeFingerprintString(decisionFingerprint, action)
+		writeArgumentsFingerprint(decisionFingerprint, inputArguments)
+	}
+	_, _ = decisionFingerprint.Write([]byte{byte(decision)})
+	decisionDigest := decisionFingerprint.Sum(nil)
 	result, err := policyengine.NewDecisionResult(policyengine.DecisionResultInput{
 		Decision: decision, DecisionID: hex.EncodeToString(decisionDigest), ReasonCode: dslResult.Reason,
 		RevisionID: session.revisionID, SlotGeneration: session.slotGeneration, DataGeneration: session.dataGeneration,
 		EvaluatedAt: session.evaluatedAt, Requirements: requirements, UsedContextualData: session.usedContextualData,
-		UsedApproval: usedApproval, UsedDelegation: session.usedDelegation,
+		ApprovalBindingDigest: approvalBindingDigest, UsedApproval: usedApproval, UsedDelegation: session.usedDelegation,
 	})
 	if err != nil {
 		return policyengine.DecisionResult{}, nil, appError(policyengine.ErrorInternal)
@@ -357,6 +377,32 @@ func checkFingerprint(request policyengine.CheckRequest) [sha256.Size]byte {
 	return digest
 }
 
+func approvalItemFingerprint(
+	subject dsl.EntityRef,
+	resource dsl.EntityRef,
+	action string,
+	arguments map[string]policyengine.Value,
+	effectiveContextFingerprint [sha256.Size]byte,
+	usedDelegation bool,
+) [sha256.Size]byte {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("cadrena.approval.item.v1"))
+	writeEntityFingerprint(hash, subject)
+	writeEntityFingerprint(hash, resource)
+	writeFingerprintString(hash, action)
+	writeFingerprintUint64(hash, uint64(len(arguments)))
+	writeArgumentsFingerprint(hash, arguments)
+	_, _ = hash.Write(effectiveContextFingerprint[:])
+	if usedDelegation {
+		_, _ = hash.Write([]byte{1})
+	} else {
+		_, _ = hash.Write([]byte{0})
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest
+}
+
 func writeArgumentsFingerprint(hash interface{ Write([]byte) (int, error) }, arguments map[string]policyengine.Value) {
 	keys := make([]string, 0, len(arguments))
 	for key := range arguments {
@@ -402,6 +448,12 @@ func writeFingerprintString(hash interface{ Write([]byte) (int, error) }, value 
 	binary.BigEndian.PutUint64(size[:], uint64(len(value)))
 	_, _ = hash.Write(size[:])
 	_, _ = hash.Write([]byte(value))
+}
+
+func writeFingerprintUint64(hash interface{ Write([]byte) (int, error) }, value uint64) {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], value)
+	_, _ = hash.Write(encoded[:])
 }
 
 func writeValueFingerprint(hash interface{ Write([]byte) (int, error) }, value policyengine.Value) {

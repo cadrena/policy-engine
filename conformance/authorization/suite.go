@@ -3,8 +3,10 @@
 package authorization
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,26 @@ import (
 type PinningController interface {
 	PauseNextRevisionLoad() (entered <-chan struct{}, resume func())
 	PauseNextSnapshotOpen() (entered <-chan struct{}, resume func())
+}
+
+// ApprovalBindingObserver exposes the bindings consumed by a conformance
+// approval verifier. It is a conformance-only fixture hook.
+type ApprovalBindingObserver interface {
+	ApprovalBindings() []policyengine.EvidenceBinding
+}
+
+var caseNames = [...]string{
+	"allow-and-deny-are-policy-decisions",
+	"approval-is-a-decision-requirement",
+	"approval-binding-digest-presence-and-redaction",
+	"approval-binding-digest-retry-stability",
+	"approval-binding-digest-item-substitution-resistance",
+	"approval-binding-verifier-result-equality",
+	"check-retains-revision-pinned-before-concurrent-slot-change",
+	"batch-retains-snapshot-pinned-before-concurrent-data-write",
+	"contextual-data-is-used-and-reported",
+	"dynamic-identifiers-remain-redacted",
+	"caller-capabilities-fail-closed",
 }
 
 const (
@@ -58,11 +80,14 @@ entity document {
 guard document.view { require_approval finance otherwise }
 `
 
+// CaseNames returns a defensive copy of the stable conformance case manifest.
+func CaseNames() []string { return append([]string(nil), caseNames[:]...) }
+
 // Run exercises policy allow/deny, approval requirements, revision pinning,
 // contextual data, redaction, and caller capability enforcement.
 func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 	t.Helper()
-	t.Run("allow and deny are policy decisions", func(t *testing.T) {
+	t.Run(caseNames[0], func(t *testing.T) {
 		engine := factory(t)
 		allowRevision := publish(t, engine, "allow.cdr", allowSource)
 		activate(t, engine, allowRevision)
@@ -82,7 +107,7 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 		}
 	})
 
-	t.Run("approval is a decision requirement", func(t *testing.T) {
+	t.Run(caseNames[1], func(t *testing.T) {
 		engine := factory(t)
 		revision := publish(t, engine, "approval.cdr", approvalSource)
 		activate(t, engine, revision)
@@ -94,7 +119,113 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 		}
 	})
 
-	t.Run("check retains revision pinned before concurrent slot change", func(t *testing.T) {
+	t.Run(caseNames[2], func(t *testing.T) {
+		engine := factory(t)
+		revision := publish(t, engine, "approval.cdr", approvalSource)
+		activate(t, engine, revision)
+		response, err := engine.Check(context.Background(), caller(t, AuthorizedCallerID), check(t, "stable", "", "alice", "document-1", contextualViewer(t, "alice", "document-1")))
+		requireNoError(t, err)
+		digest, ok := response.Result().ApprovalBindingDigest()
+		if response.Result().Decision() != policyengine.DecisionRequireApproval || !ok || digest == ([32]byte{}) {
+			t.Fatal("require-approval result did not expose a non-zero approval binding digest")
+		}
+		canaries := []string{fmt.Sprintf("%x", digest), fmt.Sprintf("%v", digest)}
+		for _, formatted := range []string{fmt.Sprintf("%v", response.Result()), fmt.Sprintf("%+v", response.Result()), fmt.Sprintf("%#v", response.Result())} {
+			for _, canary := range canaries {
+				if strings.Contains(formatted, canary) {
+					t.Fatalf("approval digest escaped result formatting: %q", formatted)
+				}
+			}
+		}
+		var logs bytes.Buffer
+		slog.New(slog.NewTextHandler(&logs, nil)).Info("decision", "result", response.Result())
+		for _, canary := range canaries {
+			if strings.Contains(logs.String(), canary) {
+				t.Fatalf("approval digest escaped slog output: %q", logs.String())
+			}
+		}
+		for _, source := range []string{allowSource, denySource} {
+			ordinary := factory(t)
+			ordinaryRevision := publish(t, ordinary, "ordinary.cdr", source)
+			activate(t, ordinary, ordinaryRevision)
+			result, resultErr := ordinary.Check(context.Background(), caller(t, AuthorizedCallerID), check(t, "stable", "", "alice", "document-1", contextualViewer(t, "alice", "document-1")))
+			requireNoError(t, resultErr)
+			if result.Result().Decision() == policyengine.DecisionRequireApproval {
+				t.Fatal("ordinary policy unexpectedly required approval")
+			}
+			if _, ok := result.Result().ApprovalBindingDigest(); ok {
+				t.Fatalf("%v result exposed an approval digest", result.Result().Decision())
+			}
+		}
+	})
+
+	t.Run(caseNames[3], func(t *testing.T) {
+		engine := factory(t)
+		revision := publish(t, engine, "approval.cdr", approvalSource)
+		activate(t, engine, revision)
+		request := check(t, "stable", "", "alice", "document-1", contextualViewer(t, "alice", "document-1"))
+		first, err := engine.Check(context.Background(), caller(t, AuthorizedCallerID), request)
+		requireNoError(t, err)
+		retry, err := engine.Check(context.Background(), caller(t, AuthorizedCallerID), request)
+		requireNoError(t, err)
+		if got, want := mustApprovalDigest(t, retry.Result()), mustApprovalDigest(t, first.Result()); got != want {
+			t.Fatalf("retry digest = %x, want %x", got, want)
+		}
+	})
+
+	t.Run(caseNames[4], func(t *testing.T) {
+		engine := factory(t)
+		revision := publish(t, engine, "approval.cdr", approvalSource)
+		activate(t, engine, revision)
+		first := approvalBatchItem(t, "document-1")
+		second := approvalBatchItem(t, "document-2")
+		request, err := policyengine.NewBatchCheckRequest(policyengine.BatchCheckRequestInput{
+			Namespace: policyNamespace, Selector: selector(t, "stable", ""), Items: []policyengine.BatchCheckItem{first, second}, ContextualData: approvalBatchContextual(t),
+		})
+		requireNoError(t, err)
+		response, err := engine.BatchCheck(context.Background(), caller(t, AuthorizedCallerID), request)
+		requireNoError(t, err)
+		results := response.Results()
+		if len(results) != 2 {
+			t.Fatalf("results = %d, want 2", len(results))
+		}
+		firstDigest := mustApprovalDigest(t, results[0])
+		if firstDigest == mustApprovalDigest(t, results[1]) {
+			t.Fatal("batch item substitution did not change the approval digest")
+		}
+		changedNeighbor, err := policyengine.NewBatchCheckRequest(policyengine.BatchCheckRequestInput{
+			Namespace: policyNamespace, Selector: selector(t, "stable", ""), Items: []policyengine.BatchCheckItem{first, approvalBatchItem(t, "document-3")}, ContextualData: approvalBatchContextual(t),
+		})
+		requireNoError(t, err)
+		retry, err := engine.BatchCheck(context.Background(), caller(t, AuthorizedCallerID), changedNeighbor)
+		requireNoError(t, err)
+		if got := mustApprovalDigest(t, retry.Results()[0]); got != firstDigest {
+			t.Fatalf("neighbor substitution changed first item digest = %x, want %x", got, firstDigest)
+		}
+	})
+
+	t.Run(caseNames[5], func(t *testing.T) {
+		engine := factory(t)
+		observer, ok := engine.(ApprovalBindingObserver)
+		if !ok || observer == nil {
+			t.Fatal("conformance factory engine does not implement ApprovalBindingObserver")
+		}
+		revision := publish(t, engine, "approval.cdr", approvalSource)
+		activate(t, engine, revision)
+		request := withApprovalEvidence(t, check(t, "stable", "", "alice", "document-1", contextualViewer(t, "alice", "document-1")), []byte("conformance-approval"))
+		response, err := engine.Check(context.Background(), caller(t, AuthorizedCallerID), request)
+		requireNoError(t, err)
+		bindings := observer.ApprovalBindings()
+		if len(bindings) != 1 {
+			t.Fatalf("approval verifier bindings = %d, want 1", len(bindings))
+		}
+		got, ok := bindings[0].AuthorizationDigest()
+		if !ok || got != mustApprovalDigest(t, response.Result()) {
+			t.Fatal("approval verifier and returned result used different bindings")
+		}
+	})
+
+	t.Run(caseNames[6], func(t *testing.T) {
 		engine := factory(t)
 		controller := pinningController(t, engine)
 		allowRevision := publish(t, engine, "allow.cdr", allowSource)
@@ -122,7 +253,7 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 		}
 	})
 
-	t.Run("batch retains snapshot pinned before concurrent data write", func(t *testing.T) {
+	t.Run(caseNames[7], func(t *testing.T) {
 		engine := factory(t)
 		controller := pinningController(t, engine)
 		revision := publish(t, engine, "snapshot.cdr", allowSource)
@@ -176,7 +307,7 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 		}
 	})
 
-	t.Run("contextual data is used and reported", func(t *testing.T) {
+	t.Run(caseNames[8], func(t *testing.T) {
 		engine := factory(t)
 		revision := publish(t, engine, "contextual.cdr", allowSource)
 		activate(t, engine, revision)
@@ -187,7 +318,7 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 		}
 	})
 
-	t.Run("dynamic identifiers remain redacted", func(t *testing.T) {
+	t.Run(caseNames[9], func(t *testing.T) {
 		engine := factory(t)
 		revision := publish(t, engine, "redaction.cdr", allowSource)
 		activate(t, engine, revision)
@@ -199,7 +330,7 @@ func Run(t *testing.T, factory func(t *testing.T) policyengine.Engine) {
 		}
 	})
 
-	t.Run("caller capabilities fail closed", func(t *testing.T) {
+	t.Run(caseNames[10], func(t *testing.T) {
 		engine := factory(t)
 		revision := publish(t, engine, "capabilities.cdr", allowSource)
 		activate(t, engine, revision)
@@ -237,8 +368,7 @@ func activateFrom(t testing.TB, engine policyengine.Engine, current, target stri
 
 func check(t testing.TB, slot, revision, subjectID, resourceID string, contextual policyengine.ContextualData) policyengine.CheckRequest {
 	t.Helper()
-	selector, err := policyengine.NewSelector(slot, revision)
-	requireNoError(t, err)
+	selector := selector(t, slot, revision)
 	request, err := policyengine.NewCheckRequest(policyengine.CheckRequestInput{
 		Namespace: policyNamespace, Selector: selector,
 		Subject: dsl.EntityRef{Type: "user", ID: subjectID}, Resource: dsl.EntityRef{Type: "document", ID: resourceID},
@@ -246,6 +376,55 @@ func check(t testing.TB, slot, revision, subjectID, resourceID string, contextua
 	})
 	requireNoError(t, err)
 	return request
+}
+
+func selector(t testing.TB, slot, revision string) policyengine.Selector {
+	t.Helper()
+	result, err := policyengine.NewSelector(slot, revision)
+	requireNoError(t, err)
+	return result
+}
+
+func withApprovalEvidence(t testing.TB, request policyengine.CheckRequest, evidence []byte) policyengine.CheckRequest {
+	t.Helper()
+	result, err := policyengine.NewCheckRequest(policyengine.CheckRequestInput{
+		Namespace: request.Namespace(), Selector: request.Selector(), Subject: request.Subject(), Resource: request.Resource(),
+		Action: request.Action(), Arguments: request.Arguments(), ContextualData: request.ContextualData(),
+		ApprovalEvidence: evidence, DelegationEvidence: request.DelegationEvidence(), MinimumGeneration: request.MinimumGeneration(),
+	})
+	requireNoError(t, err)
+	return result
+}
+
+func approvalBatchItem(t testing.TB, resourceID string) policyengine.BatchCheckItem {
+	t.Helper()
+	item, err := policyengine.NewBatchCheckItem(
+		dsl.EntityRef{Type: "user", ID: "alice"},
+		dsl.EntityRef{Type: "document", ID: resourceID},
+		"view", nil,
+	)
+	requireNoError(t, err)
+	return item
+}
+
+func approvalBatchContextual(t testing.TB) policyengine.ContextualData {
+	t.Helper()
+	tuples := make([]policyengine.RelationshipTuple, 0, 3)
+	for _, resourceID := range []string{"document-1", "document-2", "document-3"} {
+		tuples = append(tuples, contextualViewer(t, "alice", resourceID).Tuples()...)
+	}
+	contextual, err := policyengine.NewContextualData(tuples, nil)
+	requireNoError(t, err)
+	return contextual
+}
+
+func mustApprovalDigest(t testing.TB, result policyengine.DecisionResult) [32]byte {
+	t.Helper()
+	digest, ok := result.ApprovalBindingDigest()
+	if !ok || digest == ([32]byte{}) {
+		t.Fatal("require-approval result has no approval binding digest")
+	}
+	return digest
 }
 
 func contextualViewer(t testing.TB, subjectID, resourceID string) policyengine.ContextualData {

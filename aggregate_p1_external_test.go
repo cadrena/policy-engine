@@ -33,13 +33,14 @@ func TestAggregateDecisionRequirementsReturnResourceExhausted(t *testing.T) {
 		requirements[index] = maxUniqueIdentifier(index)
 	}
 	_, err := policyengine.NewDecisionResult(policyengine.DecisionResultInput{
-		Decision:       policyengine.DecisionRequireApproval,
-		DecisionID:     "decision",
-		ReasonCode:     "APPROVAL_REQUIRED",
-		RevisionID:     testRevisionID(t),
-		SlotGeneration: 1,
-		EvaluatedAt:    time.Date(2026, time.July, 29, 14, 0, 0, 0, time.UTC),
-		Requirements:   requirements,
+		Decision:              policyengine.DecisionRequireApproval,
+		DecisionID:            "decision",
+		ReasonCode:            "APPROVAL_REQUIRED",
+		RevisionID:            testRevisionID(t),
+		SlotGeneration:        1,
+		EvaluatedAt:           time.Date(2026, time.July, 29, 14, 0, 0, 0, time.UTC),
+		Requirements:          requirements,
+		ApprovalBindingDigest: [32]byte{1},
 	})
 	requireResourceExhausted(t, err)
 }
@@ -80,13 +81,14 @@ func TestAggregateBatchResponseCountsCombinedResultBytes(t *testing.T) {
 			requirements[requirementIndex] = maxUniqueIdentifier(index*len(requirements) + requirementIndex)
 		}
 		result, resultErr := policyengine.NewDecisionResult(policyengine.DecisionResultInput{
-			Decision:       policyengine.DecisionRequireApproval,
-			DecisionID:     maxUniqueIdentifier(10_000 + index),
-			ReasonCode:     "APPROVAL_REQUIRED",
-			RevisionID:     revisionID,
-			SlotGeneration: 1,
-			EvaluatedAt:    now,
-			Requirements:   requirements,
+			Decision:              policyengine.DecisionRequireApproval,
+			DecisionID:            maxUniqueIdentifier(10_000 + index),
+			ReasonCode:            "APPROVAL_REQUIRED",
+			RevisionID:            revisionID,
+			SlotGeneration:        1,
+			EvaluatedAt:           now,
+			Requirements:          requirements,
+			ApprovalBindingDigest: [32]byte{1},
 		})
 		if resultErr != nil {
 			t.Fatalf("NewDecisionResult(%d) error = %v", index, resultErr)
@@ -157,7 +159,7 @@ func TestAggregateConstructorsAcceptReachableLegalMaxima(t *testing.T) {
 	if _, err := policyengine.NewDecisionResult(policyengine.DecisionResultInput{
 		Decision: policyengine.DecisionRequireApproval, DecisionID: maxUniqueIdentifier(91_000),
 		ReasonCode: maxUniqueIdentifier(91_001), RevisionID: revisionID, SlotGeneration: 1,
-		EvaluatedAt: now, Requirements: identifiers,
+		EvaluatedAt: now, Requirements: identifiers, ApprovalBindingDigest: [32]byte{1},
 	}); err != nil {
 		t.Fatalf("maximum reachable decision result error = %v", err)
 	}
