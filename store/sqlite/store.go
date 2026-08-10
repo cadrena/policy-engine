@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -78,6 +77,9 @@ func openMigratedStore(ctx context.Context, config Config) (*Store, error) {
 }
 
 func newStoreFromDatabase(ctx context.Context, database *database) (*Store, error) {
+	if err := validateRuntimeState(ctx, database); err != nil {
+		return nil, err
+	}
 	key, err := loadCursorKey(ctx, database)
 	if err != nil {
 		return nil, err
@@ -100,23 +102,7 @@ func loadCursorKey(ctx context.Context, database *database) ([32]byte, error) {
 		return result, err
 	}
 	defer release()
-
-	var value []byte
-	err = database.readers.QueryRowContext(ctx, "SELECT value FROM cadrena_meta WHERE key = ?", cursorKeyMetaKey).Scan(&value)
-	if errors.Is(err, sql.ErrNoRows) {
-		return result, sqliteError(policyengine.ErrorIntegrity)
-	}
-	if err != nil {
-		return result, mapError(ctx, err)
-	}
-	if len(value) != len(result) {
-		return result, sqliteError(policyengine.ErrorIntegrity)
-	}
-	copy(result[:], value)
-	if err := contextError(ctx); err != nil {
-		return [32]byte{}, err
-	}
-	return result, nil
+	return readCursorKey(ctx, database.readers)
 }
 
 // Close releases SQLite resources. Concurrent calls observe the same result.

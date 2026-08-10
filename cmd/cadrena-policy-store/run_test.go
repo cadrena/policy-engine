@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cadrena/policy-engine/store/sqlite"
 	_ "modernc.org/sqlite"
 )
 
@@ -123,6 +124,111 @@ func TestRunNeverLeaksPathOrSensitiveCanaries(t *testing.T) {
 	for _, canary := range []string{path, "CANARY_POLICY", "CANARY_TUPLE", "CANARY_ATTRIBUTE", "SELECT sensitive_value FROM tuples"} {
 		if strings.Contains(output, canary) {
 			t.Fatalf("CLI output leaked %q: %q", canary, output)
+		}
+	}
+}
+
+func TestRunIntegrityAcceptsOnlyClosedMigratedStore(t *testing.T) {
+	// This catches an integrity CLI that routes through migration/repair or
+	// reports a valid store without running the exclusive offline checker.
+	path := filepath.Join(t.TempDir(), "policy.db")
+	if code := run(context.Background(), []string{"--db", path, "migrate"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("migrate exit = %d", code)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"--db", path, "integrity"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("integrity exit = %d, stderr = %q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "VALID\n" {
+		t.Fatalf("integrity stdout = %q, want one safe VALID line", got)
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("integrity stderr = %q, want empty", got)
+	}
+}
+
+func TestRunIntegrityUsesSanitizedExitCategoriesAndExclusiveMaintenance(t *testing.T) {
+	// This catches category drift, leaked durable data/paths, or an integrity
+	// command that can run alongside a runtime or another SQLite maintainer.
+	t.Run("invalid configuration", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "CANARY_POLICY", "CANARY_TUPLE", "policy.db")
+		assertRunIntegrityFailure(t, context.Background(), path, 2, "INVALID_ARGUMENT")
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "policy.db")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		assertRunIntegrityFailure(t, ctx, path, 1, "CANCELED")
+	})
+
+	t.Run("ledger corruption", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "policy.db")
+		if code := run(context.Background(), []string{"--db", path, "migrate"}, io.Discard, io.Discard); code != 0 {
+			t.Fatalf("migrate exit = %d", code)
+		}
+		database := openCLIPlainSQLite(t, path)
+		if _, err := database.ExecContext(context.Background(), "UPDATE schema_migrations SET checksum = 'CANARY_POLICY'"); err != nil {
+			t.Fatalf("corrupt ledger: %v", err)
+		}
+		if err := database.Close(); err != nil {
+			t.Fatalf("close corrupt database: %v", err)
+		}
+		assertRunIntegrityFailure(t, context.Background(), path, 1, "INTEGRITY_ERROR")
+	})
+
+	t.Run("busy SQLite transaction", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "policy.db")
+		if code := run(context.Background(), []string{"--db", path, "migrate"}, io.Discard, io.Discard); code != 0 {
+			t.Fatalf("migrate exit = %d", code)
+		}
+		database := openCLIPlainSQLite(t, path)
+		conn, err := database.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("database.Conn() error = %v", err)
+		}
+		defer conn.Close()
+		defer database.Close()
+		if _, err := conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
+			t.Fatalf("BEGIN EXCLUSIVE error = %v", err)
+		}
+		defer conn.ExecContext(context.Background(), "ROLLBACK")
+		assertRunIntegrityFailure(t, context.Background(), path, 1, "UNAVAILABLE")
+	})
+
+	t.Run("live runtime shared lock", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "policy.db")
+		if code := run(context.Background(), []string{"--db", path, "migrate"}, io.Discard, io.Discard); code != 0 {
+			t.Fatalf("migrate exit = %d", code)
+		}
+		runtime, err := sqlite.Open(sqlite.Config{
+			Path: path, BusyTimeout: cliBusyTimeout, MaxReaders: 1, Synchronous: sqlite.SynchronousFull,
+			ActivationHistoryRetention: cliActivationHistoryRetention, Clock: wallClock{},
+		})
+		if err != nil {
+			t.Fatalf("sqlite.Open() error = %v", err)
+		}
+		defer runtime.Close()
+		assertRunIntegrityFailure(t, context.Background(), path, 1, "UNAVAILABLE")
+	})
+}
+
+func assertRunIntegrityFailure(t *testing.T, ctx context.Context, path string, wantCode int, wantCategory string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := run(ctx, []string{"--db", path, "integrity"}, &stdout, &stderr)
+	if code != wantCode {
+		t.Fatalf("integrity exit = %d, want %d; stdout=%q stderr=%q", code, wantCode, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("integrity failure stdout = %q, want empty", got)
+	}
+	if got := stderr.String(); got != wantCategory+"\n" {
+		t.Fatalf("integrity stderr = %q, want %q", got, wantCategory+"\n")
+	}
+	for _, canary := range []string{path, "CANARY_POLICY", "CANARY_TUPLE", "CANARY_ATTRIBUTE", "SELECT", "sqlite", "modernc"} {
+		if strings.Contains(stdout.String()+stderr.String(), canary) {
+			t.Fatalf("integrity output leaked %q: %q", canary, stdout.String()+stderr.String())
 		}
 	}
 }

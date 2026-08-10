@@ -4,9 +4,32 @@ GOLANGCI_LINT_VERSION ?= v2.1.6
 GOVULNCHECK_VERSION ?= v1.1.4
 GITLEAKS_VERSION ?= v8.30.1
 
-.PHONY: all boundary boundary-test fmt-check generated-check gitleaks lint race test vet vuln-check
+.PHONY: all batch-2a-final batch-2a-focused boundary boundary-test fmt-check generated-check gitleaks lint race test vet vuln-check
 
 all: fmt-check lint test race vet generated-check vuln-check boundary boundary-test gitleaks
+
+# These release gates deliberately spell out every command so a local Make run
+# uses the same toolchain and coverage as the recorded Batch 2A evidence.
+batch-2a-focused: export GOTOOLCHAIN = go1.25.12
+batch-2a-focused:
+	$(GO) test . ./internal/app ./conformance/authorization -run 'Test.*(ApprovalBinding|AuthorizationDigest|ApprovalContinuation)' -count=10
+	$(GO) test ./store/sqlite ./store/conformance ./cmd/cadrena-policy-store -count=10
+	$(GO) test ./store/sqlite ./cmd/cadrena-policy-store -run 'Test(Integrity|Recovery|Crash|Subprocess|RunIntegrity)' -count=10
+
+batch-2a-final: export GOTOOLCHAIN = go1.25.12
+batch-2a-final:
+	$(GO) version
+	$(MAKE) batch-2a-focused
+	$(GO) test ./... -count=3
+	$(GO) test -race ./... -count=1
+	$(GO) vet ./...
+	$(GO) mod verify
+	$(MAKE) fmt-check lint generated-check
+	$(MAKE) boundary boundary-test
+	$(MAKE) vuln-check
+	$(MAKE) gitleaks
+	git diff --check
+	git status --short --branch
 
 fmt-check:
 	@set -eu; \

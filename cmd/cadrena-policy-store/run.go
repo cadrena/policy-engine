@@ -80,6 +80,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, "VALID")
 		return 0
+	case "integrity":
+		// FullIntegrityCheck owns its own bounded maintenance-lock wait. Passing
+		// the caller context through preserves explicit cancellation/deadline
+		// categories while a normal busy store is reported as UNAVAILABLE.
+		if err := sqlite.FullIntegrityCheck(ctx, config); err != nil {
+			return writeCLIResultError(stderr, err)
+		}
+		fmt.Fprintln(stdout, "VALID")
+		return 0
 	default:
 		return writeCLIError(stderr, policyengine.ErrorInvalidArgument)
 	}

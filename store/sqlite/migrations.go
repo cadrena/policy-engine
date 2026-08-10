@@ -269,6 +269,9 @@ func validateSchemaUnderSharedLock(ctx context.Context, config Config) error {
 	if !exists {
 		return sqliteError(policyengine.ErrorFailedPrecondition)
 	}
+	if err := validateRuntimeWALState(ctx, config.Path); err != nil {
+		return integrityResultError(ctx, err)
+	}
 
 	database, conn, err := openMigrationConnection(ctx, config, true)
 	if err != nil {
