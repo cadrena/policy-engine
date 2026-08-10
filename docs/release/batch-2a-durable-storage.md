@@ -9,7 +9,9 @@ review remediation gate passed on
 `5e730d32ad160c09ce88d48f1c8ee2880bec2c73`. The required fresh Task 6 review
 and required fresh whole-branch review have still not occurred. This document
 therefore records a blocked decision rather than inferring authorization from
-test results or remediation work.
+test results or remediation work. The subsequent SQLite no-follow remediation
+gate passed on `f6648fdb5f73fb7afd987f9a579cd76b4c7d6ed6`; it likewise changes
+no authorization decision.
 
 ## Candidate and commit chain
 
@@ -22,11 +24,11 @@ Merge base: `846fb7b0a6bb24eff31d350d727b0ff68ea3f9a9`.
 | 3 | `62cdd9b`, `a2fc373` |
 | 4 | `bbb84a1`, `6d8151a` |
 | 5 | `b079ed0`, `b3e1e1b`, `44494d5` |
-| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist), `cf4765` (initial blocked evidence), `affc223` (corrective integrity invariants and WAL preservation), `3aaf5c2` (final review hardening), `5e730d3` (test-only lint correction) |
+| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist), `cf4765` (initial blocked evidence), `affc223` (corrective integrity invariants and WAL preservation), `3aaf5c2` (final review hardening), `5e730d3` (test-only lint correction), `f6648fd` (SQLite no-follow remediation) |
 
 The initial implementation candidate used for the first final green gate was
 `c81ccabe5af4901027dc5ab68ea87cf00dfa650c`. The latest remediation candidate
-is `5e730d32ad160c09ce88d48f1c8ee2880bec2c73`.
+is `f6648fdb5f73fb7afd987f9a579cd76b4c7d6ed6`.
 
 ## Durable format and environment
 
@@ -315,13 +317,59 @@ and 61-commit-history scans, whitespace diff check, and clean-status check.
 This final evidence record does not replace the pending fresh reviews or alter
 the blocked decision.
 
+## Appendix — SQLite NOFOLLOW remediation
+
+Implementation commit `f6648fdb5f73fb7afd987f9a579cd76b4c7d6ed6` closes the
+remaining SQLite pathname TOCTOU at the driver boundary without changing the
+durable schema or public store interfaces.
+
+- A bounded `internal/sqlitenofollow` mirror of the top-level
+  `modernc.org/sqlite v1.56.0` driver adds `SQLITE_OPEN_NOFOLLOW` to every
+  `sqlite3_open_v2` call. The generated `lib` and `vtab` packages remain the
+  original pinned module.
+- The store resolves a real parent directory once, preserves the final
+  basename, rejects an already-present final symlink or nonregular object, and
+  uses that canonical path for every lock and connector path. SQLite remains
+  authoritative for a final-component swap after validation.
+- Unix regressions force SQLite's real `pUnused` cached-descriptor path by
+  retaining a target read transaction and closing sibling target descriptors.
+  Runtime writer/reader, migration writer/reader, and full-integrity
+  connectors reject the post-validation symlink without modifying the canary.
+- The fork registers `cadrena-sqlite-nofollow`, not upstream's global `sqlite`
+  name. An external-package regression imports both policy SQLite storage and
+  upstream `modernc.org/sqlite`, proving both driver names coexist without an
+  initialization panic. Production continues to use `NewConnector`.
+- `UPSTREAM.md`, the retained BSD-3-Clause license, a local SHA-256 manifest,
+  an upstream module-pin assertion, and `make sqlitenofollow-manifest` record
+  the bounded source and update procedure. The preserved upstream FFI source
+  is lint-excluded and runs all normal `go vet` analyzers except its inherited
+  `unsafeptr` diagnostics; project packages retain the complete vet set.
+
+### Committed-input NOFOLLOW gate
+
+The worktree was clean at
+`f6648fdb5f73fb7afd987f9a579cd76b4c7d6ed6` before the exact aggregate command
+ran and exited 0:
+
+```text
+rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final
+```
+
+The target reported `go1.25.12 darwin/arm64` and passed focused repetitions,
+normal and race suites, the scoped fork vet target, module verification,
+format/lint/generation, fork-manifest verification, public-boundary checks,
+vulnerability scan, directory and history gitleaks scans, whitespace diff
+check, and clean-status check. A post-target `git status --short --branch` and
+`git diff --check` were also clean. This evidence is informational only and
+does not replace the fresh reviews required below.
+
 ## Review state and non-goals
 
 | scope | fresh review verdict |
 | --- | --- |
 | Tasks 1–5 | clean according to their recorded implementation-ledger reviews |
-| Task 6 | pending — corrective `affc223` and remediation `3aaf5c2`/`5e730d3` have not yet received a fresh review |
-| Full Task 1–6 branch/evidence | pending — not yet performed after the remediation evidence update |
+| Task 6 | pending — corrective `affc223`, remediation `3aaf5c2`/`5e730d3`, and no-follow remediation `f6648fd` have not yet received a fresh review |
+| Full Task 1–6 branch/evidence | pending — not yet performed after the no-follow evidence update |
 
 The two pending reviews above are the sole blockers. This work creates no tag,
 does not publish an artifact, and is not a v1.0 release decision. Batch 2B may
