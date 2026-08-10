@@ -4,10 +4,12 @@
 
 The original implementation and repository gates passed on candidate
 `c81ccabe5af4901027dc5ab68ea87cf00dfa650c`; the corrective Task 6 gate passed
-on `affc22304524f9afb48c2321a9c73abbfeac54f3`. The only remaining gates are
-the required fresh Task 6 review and the required fresh whole-branch review.
-Those reviews have not occurred, so this document intentionally records a
-blocked decision rather than inferring authorization from the test results.
+on `affc22304524f9afb48c2321a9c73abbfeac54f3`; and the final whole-branch
+review remediation gate passed on
+`5e730d32ad160c09ce88d48f1c8ee2880bec2c73`. The required fresh Task 6 review
+and required fresh whole-branch review have still not occurred. This document
+therefore records a blocked decision rather than inferring authorization from
+test results or remediation work.
 
 ## Candidate and commit chain
 
@@ -20,10 +22,11 @@ Merge base: `846fb7b0a6bb24eff31d350d727b0ff68ea3f9a9`.
 | 3 | `62cdd9b`, `a2fc373` |
 | 4 | `bbb84a1`, `6d8151a` |
 | 5 | `b079ed0`, `b3e1e1b`, `44494d5` |
-| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist), `cf4765` (initial blocked evidence), `affc223` (corrective integrity invariants and WAL preservation) |
+| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist), `cf4765` (initial blocked evidence), `affc223` (corrective integrity invariants and WAL preservation), `3aaf5c2` (final review hardening), `5e730d3` (test-only lint correction) |
 
-The implementation candidate used for the final green gate was
-`c81ccabe5af4901027dc5ab68ea87cf00dfa650c`.
+The initial implementation candidate used for the first final green gate was
+`c81ccabe5af4901027dc5ab68ea87cf00dfa650c`. The latest remediation candidate
+is `5e730d32ad160c09ce88d48f1c8ee2880bec2c73`.
 
 ## Durable format and environment
 
@@ -38,9 +41,14 @@ The implementation candidate used for the final green gate was
   `modernc.org/libc v1.74.4`.
 - Locking boundary: only Darwin and Linux local filesystems are supported.
   Runtime and maintenance coordination uses owner-only (`0600`) `<database>.lock`
-  sidecars and nonblocking `flock` shared/exclusive locks. Other operating
-  systems fail closed; network/distributed filesystem lock semantics are not a
-  supported deployment boundary.
+  sidecars and nonblocking `flock` shared/exclusive locks. The runtime and
+  maintenance entry boundaries now classify the database parent with a
+  fail-closed platform allowlist: Darwin APFS/HFS; Linux ext4, XFS, Btrfs,
+  F2FS, tmpfs, and overlayfs. Network, FUSE, unknown, and all other operating
+  systems return `FAILED_PRECONDITION` before lock or SQLite setup. Database
+  and sidecar setup opens the final component with no-follow flags, verifies
+  the descriptor is regular with `fstat`, then sets `0600`; symlinks and
+  nonregular objects fail without changing their target.
 
 ## Task 6 behavior and focused evidence
 
@@ -221,18 +229,81 @@ rtk run 'env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final'
 This post-evidence PASS is evidence only; it does not replace either required
 fresh review or change the terminal blocked decision below.
 
-Deferred minor: `.gitleaksignore` contains an exact SDD fingerprint and is
-safe in scope, but it couples secret-scanning policy to an ignored artifact.
-It remains unchanged in this corrective fix and should be reconsidered during
-the fresh evidence review.
+## Final whole-branch review remediation
+
+Implementation commit `3aaf5c21a5cecfc8da48d03dda9f323d1b0a1786` and
+test-only lint correction `5e730d32ad160c09ce88d48f1c8ee2880bec2c73` address
+the final review findings without changing the schema or authorizing a later
+batch.
+
+- Bounded runtime validation now rejects a persisted `state_events.sequence`
+  above its namespace head through a `SELECT EXISTS` relation probe. The
+  existing namespace-head metadata scan remains the outer bounded startup
+  work; the event lookup uses the `(namespace, sequence)` primary key and does
+  not decode or scan event payloads. The existing `expired_through <=
+  event_sequence` validation remains in place.
+- Runtime `Open` and every maintenance entry (`PlanMigrations`,
+  `ApplyMigrations`, `ValidateSchema`, and `FullIntegrityCheck`) classify their
+  storage parent before lock or SQLite setup. Unsupported filesystem outcomes
+  are sanitized to `FAILED_PRECONDITION`; unexpected classifier failures are
+  sanitized to `INTERNAL`.
+- Owner-only database and lock setup now reject final-component symlinks,
+  directories, FIFOs, and other nonregular objects using platform-specific
+  no-follow open plus descriptor `fstat`; a rejected outside canary is neither
+  chmodded nor migrated.
+- Migration ledger timestamps now use the same panic-safe, nonzero,
+  representable UTC canonical-clock boundary as runtime clocks. A panicking or
+  zero clock produces sanitized `INTERNAL` and rolls back the migration
+  transaction before a schema-migration or cursor-key ledger record commits.
+
+The RED probes were captured before implementation: `Open` accepted a
+persisted event beyond its head; all injected unsupported-filesystem entry
+calls reached their normal paths; symlink setup chmodded disposable `0644`
+canaries while directories returned `INTERNAL`; the no-follow FIFO helper was
+absent; a migration clock panic escaped and a zero clock committed. The focused
+GREEN regressions and `go test ./store/sqlite -count=1` passed. A Linux
+`GOOS=linux GOARCH=amd64` compile-only SQLite test binary also built cleanly;
+an initial cross-platform `go test` run was not used as evidence because it
+correctly could not execute a Linux test binary on Darwin.
+
+The first aggregate attempt on `3aaf5c2` passed tests, race, vet, and module
+verification, then failed only the pinned `revive` lint rule on test helper
+signature/unused-parameter style. Commit `5e730d3` changes only those test
+signatures, preserves the RED/GREEN assertions, and passed the pinned lint
+command before the clean candidate rerun.
+
+Candidate `5e730d32ad160c09ce88d48f1c8ee2880bec2c73` was clean before the
+complete pre-evidence aggregate command. It ran from
+`2026-08-10T05:53:19Z` through `2026-08-10T05:55:29Z`, exited 0, and left the
+worktree clean:
+
+```text
+rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final
+```
+
+The target reported `go1.25.12 darwin/arm64` and passed all focused repeats,
+complete normal and race suites, vet, module verification, format/lint/
+generation checks, public-boundary checks and 20 Python boundary tests,
+vulnerability scan, directory and 60-commit-history gitleaks scans, whitespace
+diff check, and clean-status check.
+
+Deferred minor — retain only `.gitleaksignore:1`: it is the exact fingerprint
+for the ignored local SDD review artifact
+`.superpowers/sdd/2026-08-10-batch-2a-policy-engine-durable-storage/review-9eb98c8..2edc312.diff`
+and no other allowlist entry was added or changed by this remediation. Remove
+that line only in the same cleanup change that removes this ignored artifact
+from the scanned worktree; then record a passing
+`rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make gitleaks` report
+covering both directory and history scans. The SDD artifact remains retained
+for this review, so line 1 remains necessary and unchanged.
 
 ## Review state and non-goals
 
 | scope | fresh review verdict |
 | --- | --- |
 | Tasks 1–5 | clean according to their recorded implementation-ledger reviews |
-| Task 6 | pending — corrective `affc223` has not yet received a fresh review |
-| Full Task 1–6 branch/evidence | pending — not yet performed |
+| Task 6 | pending — corrective `affc223` and remediation `3aaf5c2`/`5e730d3` have not yet received a fresh review |
+| Full Task 1–6 branch/evidence | pending — not yet performed after the remediation evidence update |
 
 The two pending reviews above are the sole blockers. This work creates no tag,
 does not publish an artifact, and is not a v1.0 release decision. Batch 2B may
