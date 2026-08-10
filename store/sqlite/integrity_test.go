@@ -70,10 +70,26 @@ func TestIntegrityFullCheckRejectsIndependentDurableInvariantViolations(t *testi
 			},
 		},
 		{
-			name:     "slot head without current history",
+			name:     "slot head with empty activation history",
 			populate: true,
 			mutate: func(t *testing.T, db *sql.DB) {
-				mustExecMigrationTest(t, db, "DELETE FROM activation_history WHERE namespace = 'integrity-fixture' AND slot = 'primary' AND generation = 1")
+				mustExecMigrationTest(t, db, "DELETE FROM activation_history WHERE namespace = 'integrity-fixture' AND slot = 'primary'")
+			},
+		},
+		{
+			name:     "activation history missing current head record",
+			populate: true,
+			mutate: func(t *testing.T, db *sql.DB) {
+				mustExecMigrationTest(t, db, "INSERT INTO activation_history(namespace, slot, generation, revision_id, activated_at_ns) SELECT namespace, slot, 2, revision_id, activated_at_ns FROM activation_history WHERE namespace = 'integrity-fixture' AND slot = 'primary' AND generation = 1")
+				mustExecMigrationTest(t, db, "UPDATE slot_heads SET generation = 3 WHERE namespace = 'integrity-fixture' AND slot = 'primary'")
+			},
+		},
+		{
+			name:     "activation history interior generation gap",
+			populate: true,
+			mutate: func(t *testing.T, db *sql.DB) {
+				mustExecMigrationTest(t, db, "INSERT INTO activation_history(namespace, slot, generation, revision_id, activated_at_ns) SELECT namespace, slot, 3, revision_id, activated_at_ns FROM activation_history WHERE namespace = 'integrity-fixture' AND slot = 'primary' AND generation = 1")
+				mustExecMigrationTest(t, db, "UPDATE slot_heads SET generation = 3 WHERE namespace = 'integrity-fixture' AND slot = 'primary'")
 			},
 		},
 		{
@@ -95,6 +111,36 @@ func TestIntegrityFullCheckRejectsIndependentDurableInvariantViolations(t *testi
 			populate: true,
 			mutate: func(t *testing.T, db *sql.DB) {
 				mustExecMigrationTest(t, db, "UPDATE idempotency_records SET response = X'00' WHERE namespace = 'integrity-fixture' AND idempotency_key = 'fixture-attribute'")
+			},
+		},
+		{
+			name:     "idempotency response missing successful generation",
+			populate: true,
+			mutate: func(t *testing.T, db *sql.DB) {
+				mustExecMigrationTest(t, db, "DELETE FROM idempotency_records WHERE namespace = 'integrity-fixture' AND idempotency_key = 'fixture-tuple'")
+			},
+		},
+		{
+			name:     "idempotency responses duplicate a successful generation",
+			populate: true,
+			mutate: func(t *testing.T, db *sql.DB) {
+				mustExecMigrationTest(t, db, "INSERT INTO idempotency_records(namespace, idempotency_key, fingerprint, response) SELECT namespace, 'fixture-duplicate', fingerprint, response FROM idempotency_records WHERE namespace = 'integrity-fixture' AND idempotency_key = 'fixture-tuple'")
+			},
+		},
+		{
+			name:     "idempotency responses skip a successful generation",
+			populate: true,
+			mutate: func(t *testing.T, db *sql.DB) {
+				response, err := policyengine.NewWriteDataResponse(3, false)
+				if err != nil {
+					t.Fatalf("NewWriteDataResponse() error = %v", err)
+				}
+				encoded, err := encodeIdempotencyResponse(response)
+				if err != nil {
+					t.Fatalf("encodeIdempotencyResponse() error = %v", err)
+				}
+				mustExecIntegrityTest(t, db, "UPDATE namespace_heads SET data_generation = 3 WHERE namespace = 'integrity-fixture'")
+				mustExecIntegrityTest(t, db, "UPDATE idempotency_records SET response = ? WHERE namespace = 'integrity-fixture' AND idempotency_key = 'fixture-attribute'", encoded)
 			},
 		},
 		{
@@ -137,6 +183,23 @@ func TestIntegrityFullCheckRejectsIndependentDurableInvariantViolations(t *testi
 				t.Fatalf("FullIntegrityCheck(%s) category = %v, want %v", tc.name, got, policyengine.ErrorIntegrity)
 			}
 		})
+	}
+}
+
+func TestIntegrityFullCheckAllowsContiguousPrunedActivationHistorySuffix(t *testing.T) {
+	// Retention may prune an initial prefix, but retained rows must remain a
+	// contiguous suffix ending at the durable slot head.
+	config := migratedIntegrityConfig(t)
+	populateIntegrityFixture(t, config)
+	mutateIntegrityDatabase(t, config, func(t *testing.T, db *sql.DB) {
+		mustExecMigrationTest(t, db, "INSERT INTO activation_history(namespace, slot, generation, revision_id, activated_at_ns) SELECT namespace, slot, 2, revision_id, activated_at_ns FROM activation_history WHERE namespace = 'integrity-fixture' AND slot = 'primary' AND generation = 1")
+		mustExecMigrationTest(t, db, "INSERT INTO activation_history(namespace, slot, generation, revision_id, activated_at_ns) SELECT namespace, slot, 3, revision_id, activated_at_ns FROM activation_history WHERE namespace = 'integrity-fixture' AND slot = 'primary' AND generation = 1")
+		mustExecMigrationTest(t, db, "DELETE FROM activation_history WHERE namespace = 'integrity-fixture' AND slot = 'primary' AND generation = 1")
+		mustExecMigrationTest(t, db, "UPDATE slot_heads SET generation = 3 WHERE namespace = 'integrity-fixture' AND slot = 'primary'")
+	})
+
+	if err := FullIntegrityCheck(context.Background(), config); err != nil {
+		t.Fatalf("FullIntegrityCheck(contiguous pruned history) error = %v", err)
 	}
 }
 
@@ -240,6 +303,13 @@ func mutateIntegrityDatabase(t *testing.T, config Config, mutate func(t *testing
 	mutate(t, database)
 	if err := database.Close(); err != nil {
 		t.Fatalf("close mutated database: %v", err)
+	}
+}
+
+func mustExecIntegrityTest(t *testing.T, database *sql.DB, statement string, args ...any) {
+	t.Helper()
+	if _, err := database.ExecContext(context.Background(), statement, args...); err != nil {
+		t.Fatalf("execute %q: %v", statement, err)
 	}
 }
 

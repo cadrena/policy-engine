@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -36,8 +37,9 @@ func TestRecoveryCleanReopenReconstructsCommittedPublicValues(t *testing.T) {
 }
 
 func TestCrashRecoveryRestoresCommittedWALTransactionBeforeCheckpoint(t *testing.T) {
-	// This catches recovery that treats a process exit after COMMIT as lost work
-	// or relies on a clean close/checkpoint instead of SQLite's WAL recovery.
+	// This catches an offline checker that becomes the recovery/checkpoint step:
+	// a committed hot WAL must stay byte-for-byte intact until the runtime opens
+	// it directly and proves SQLite recovery can reconstruct public state.
 	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
 	child := startSQLiteRecoverySubprocess(t, "committed", config.Path)
 	child.awaitReady(t)
@@ -46,9 +48,12 @@ func TestCrashRecoveryRestoresCommittedWALTransactionBeforeCheckpoint(t *testing
 		t.Fatalf("committed helper WAL = %v, %v; want non-empty WAL before crash", info, err)
 	}
 	child.releaseAndWait(t)
+	before := snapshotHotWALArtifacts(t, config.Path)
 	if err := FullIntegrityCheck(context.Background(), config); err != nil {
 		t.Fatalf("FullIntegrityCheck(after committed crash) error = %v", err)
 	}
+	after := snapshotHotWALArtifacts(t, config.Path)
+	assertHotWALDurableStatePreserved(t, before, after)
 
 	recovered, err := Open(config)
 	if err != nil {
@@ -58,6 +63,47 @@ func TestCrashRecoveryRestoresCommittedWALTransactionBeforeCheckpoint(t *testing
 	assertSubprocessRecoveryFixture(t, recovered)
 	if err := FullIntegrityCheck(context.Background(), config); categoryOf(err) != policyengine.ErrorUnavailable {
 		t.Fatalf("FullIntegrityCheck(live runtime) category = %v, want %v", categoryOf(err), policyengine.ErrorUnavailable)
+	}
+}
+
+type hotWALArtifact struct {
+	exists bool
+	bytes  []byte
+}
+
+func snapshotHotWALArtifacts(t *testing.T, databasePath string) map[string]hotWALArtifact {
+	t.Helper()
+	artifacts := make(map[string]hotWALArtifact, 2)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		contents, err := os.ReadFile(databasePath + suffix)
+		if os.IsNotExist(err) {
+			artifacts[suffix] = hotWALArtifact{}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read hot WAL artifact %q: %v", suffix, err)
+		}
+		artifacts[suffix] = hotWALArtifact{exists: true, bytes: contents}
+	}
+	if artifact := artifacts["-wal"]; !artifact.exists || len(artifact.bytes) == 0 {
+		t.Fatalf("hot WAL snapshot = %#v, want a non-empty WAL before integrity check", artifact)
+	}
+	return artifacts
+}
+
+func assertHotWALDurableStatePreserved(t *testing.T, before, after map[string]hotWALArtifact) {
+	t.Helper()
+	originalWAL, currentWAL := before["-wal"], after["-wal"]
+	if !originalWAL.exists || !currentWAL.exists || !bytes.Equal(originalWAL.bytes, currentWAL.bytes) {
+		t.Fatalf("hot WAL changed across FullIntegrityCheck: before exists=%t bytes=%d, after exists=%t bytes=%d", originalWAL.exists, len(originalWAL.bytes), currentWAL.exists, len(currentWAL.bytes))
+	}
+	// SQLite's SHM file includes lock and wal-index bookkeeping. BEGIN EXCLUSIVE
+	// is allowed to refresh those transient bytes, so the durable assertion is
+	// that an existing sidecar remains present and non-empty; the direct Open
+	// below proves SQLite can consume the sidecar and recover the original WAL.
+	originalSHM, currentSHM := before["-shm"], after["-shm"]
+	if originalSHM.exists && (!currentSHM.exists || len(currentSHM.bytes) == 0) {
+		t.Fatalf("hot SHM sidecar was not preserved across FullIntegrityCheck: before exists=%t bytes=%d, after exists=%t bytes=%d", originalSHM.exists, len(originalSHM.bytes), currentSHM.exists, len(currentSHM.bytes))
 	}
 }
 
@@ -175,6 +221,20 @@ func TestIntegrityFullCheckReturnsUnavailableForSQLiteBusyAndReleasesStaleRuntim
 		}
 	})
 
+	t.Run("subprocess raw SQLite writer", func(t *testing.T) {
+		config := migratedIntegrityConfig(t)
+		child := startSQLiteRecoverySubprocess(t, "hold-raw-writer", config.Path)
+		child.awaitReady(t)
+		if got := categoryOf(FullIntegrityCheck(context.Background(), config)); got != policyengine.ErrorUnavailable {
+			child.releaseAndWait(t)
+			t.Fatalf("FullIntegrityCheck(external raw writer) category = %v, want %v", got, policyengine.ErrorUnavailable)
+		}
+		child.releaseAndWait(t)
+		if err := FullIntegrityCheck(context.Background(), config); err != nil {
+			t.Fatalf("FullIntegrityCheck(after external raw writer) error = %v", err)
+		}
+	})
+
 	t.Run("stale runtime lock", func(t *testing.T) {
 		config := migratedIntegrityConfig(t)
 		child := startSQLiteRecoverySubprocess(t, "hold-runtime", config.Path)
@@ -206,7 +266,7 @@ func TestIntegrityFullCheckReturnsUnavailableForSQLiteBusyAndReleasesStaleRuntim
 
 func assertSubprocessRecoveryFixture(t *testing.T, adapter *Store) {
 	t.Helper()
-	revision, err := subprocessRecoveryRevision()
+	revision, err := expectedSubprocessRecoveryRevision()
 	if err != nil {
 		t.Fatalf("rebuild expected revision: %v", err)
 	}
@@ -214,19 +274,39 @@ func assertSubprocessRecoveryFixture(t *testing.T, adapter *Store) {
 	if err != nil {
 		t.Fatalf("GetRevision() error = %v", err)
 	}
-	if got, want := stored.Metadata().ID(), revision.Metadata().ID(); got != want {
-		t.Fatalf("stored revision ID = %q, want %q", got, want)
+	wantMetadata, gotMetadata := revision.Metadata(), stored.Metadata()
+	if gotMetadata.Namespace() != wantMetadata.Namespace() || gotMetadata.ID() != wantMetadata.ID() || !gotMetadata.PublishedAt().Equal(wantMetadata.PublishedAt()) {
+		t.Fatalf("stored revision metadata = namespace %q ID %q published %s, want namespace %q ID %q published %s", gotMetadata.Namespace(), gotMetadata.ID(), gotMetadata.PublishedAt(), wantMetadata.Namespace(), wantMetadata.ID(), wantMetadata.PublishedAt())
+	}
+	if got, want := stored.Artifact(), revision.Artifact(); !bytes.Equal(got, want) {
+		t.Fatalf("stored revision artifact = %x, want %x", got, want)
+	}
+	wantProvenance, gotProvenance := revision.Provenance(), stored.Provenance()
+	if gotProvenance.SourceName() != wantProvenance.SourceName() || !bytes.Equal(gotProvenance.OriginalSource(), wantProvenance.OriginalSource()) || gotProvenance.OriginalSourceDigest() != wantProvenance.OriginalSourceDigest() || !gotProvenance.Valid() || !stored.Valid() {
+		t.Fatalf("stored revision provenance or validity differs after recovery")
 	}
 
 	resolved, err := adapter.Resolve(context.Background(), mustSubprocessResolveRequest(t))
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
-	if activation := resolved.Activation(); activation.RevisionID() != revision.Metadata().ID() || activation.Generation() != 1 {
-		t.Fatalf("resolved activation = %#v, want revision %q generation 1", activation, revision.Metadata().ID())
+	if activation := resolved.Activation(); activation.Namespace() != "crash-recovery" || activation.Slot() != "primary" || activation.RevisionID() != revision.Metadata().ID() || activation.Generation() != 1 || !activation.ActivatedAt().Equal(time.Unix(0, 0).UTC()) {
+		t.Fatalf("resolved activation differs from the committed public value")
 	}
 
-	request, tupleKey, err := subprocessRecoveryDataRequest(revision.Metadata().ID())
+	generationRequest, err := policyengine.NewGetDataGenerationRequest("crash-recovery")
+	if err != nil {
+		t.Fatalf("NewGetDataGenerationRequest() error = %v", err)
+	}
+	generation, err := adapter.GetDataGeneration(context.Background(), generationRequest)
+	if err != nil {
+		t.Fatalf("GetDataGeneration() error = %v", err)
+	}
+	if generation.Generation() != 1 || !generation.Valid() {
+		t.Fatalf("recovered data generation = %#v, want valid generation 1", generation)
+	}
+
+	request, tupleKey, err := expectedSubprocessRecoveryDataRequest(revision.Metadata().ID())
 	if err != nil {
 		t.Fatalf("rebuild expected data request: %v", err)
 	}
@@ -238,7 +318,8 @@ func assertSubprocessRecoveryFixture(t *testing.T, adapter *Store) {
 		t.Fatalf("WriteData(replay) = %#v, want generation 1 replay", replay)
 	}
 
-	snapshotRequest, err := store.NewSnapshotRequest("crash-recovery", 1, time.Unix(100, 0).UTC())
+	readAt := time.Unix(100, 0).UTC()
+	snapshotRequest, err := store.NewSnapshotRequest("crash-recovery", 1, readAt)
 	if err != nil {
 		t.Fatalf("NewSnapshotRequest() error = %v", err)
 	}
@@ -247,6 +328,9 @@ func assertSubprocessRecoveryFixture(t *testing.T, adapter *Store) {
 		t.Fatalf("OpenSnapshot() error = %v", err)
 	}
 	defer func() { _ = snapshot.Close() }()
+	if snapshot.Namespace() != "crash-recovery" || snapshot.Generation() != 1 || snapshot.MinimumGeneration() != 1 || !snapshot.ReadAt().Equal(readAt) {
+		t.Fatalf("recovered snapshot provenance differs from requested committed view")
+	}
 	query, err := store.NewTupleQuery(tupleKey.Tuple().Resource, tupleKey.Tuple().Relation, 1)
 	if err != nil {
 		t.Fatalf("NewTupleQuery() error = %v", err)
@@ -255,13 +339,37 @@ func assertSubprocessRecoveryFixture(t *testing.T, adapter *Store) {
 	if err != nil {
 		t.Fatalf("QueryTuples() error = %v", err)
 	}
-	if subjects := result.Subjects(); len(subjects) != 1 || subjects[0].Type != "user" || subjects[0].ID != "subject" {
-		t.Fatalf("recovered tuple subjects = %#v, want user:subject", subjects)
+	if gotQuery := result.Query(); gotQuery.Resource() != tupleKey.Tuple().Resource || gotQuery.Relation() != tupleKey.Tuple().Relation || gotQuery.Limit() != 1 || !result.Valid() {
+		t.Fatalf("recovered tuple result provenance differs from the exact query")
+	}
+	if subjects := result.Subjects(); len(subjects) != 1 || subjects[0] != tupleKey.Tuple().Subject {
+		t.Fatalf("recovered tuple subjects = %#v, want %#v", subjects, tupleKey.Tuple().Subject)
 	}
 
 	events := sqliteEventsForTest(t, adapter, "crash-recovery")
-	if len(events) != 3 || events[0].Kind() != policyengine.StateEventRevisionPublished || events[1].Kind() != policyengine.StateEventSlotActivated || events[2].Kind() != policyengine.StateEventDataWritten {
-		t.Fatalf("recovered events = %#v, want revision/activation/data sequence", events)
+	wantEvents := []struct {
+		kind           policyengine.StateEventKind
+		revisionID     string
+		slot           string
+		slotGeneration uint64
+		dataGeneration uint64
+	}{
+		{kind: policyengine.StateEventRevisionPublished, revisionID: revision.Metadata().ID()},
+		{kind: policyengine.StateEventSlotActivated, revisionID: revision.Metadata().ID(), slot: "primary", slotGeneration: 1},
+		{kind: policyengine.StateEventDataWritten, dataGeneration: 1},
+	}
+	if len(events) != len(wantEvents) {
+		t.Fatalf("recovered event count = %d, want %d", len(events), len(wantEvents))
+	}
+	for index, want := range wantEvents {
+		event := events[index]
+		if event.Namespace() != "crash-recovery" || event.Kind() != want.kind || event.RevisionID() != want.revisionID || event.Slot() != want.slot || event.SlotGeneration() != want.slotGeneration || event.DataGeneration() != want.dataGeneration || !event.OccurredAt().Equal(time.Unix(0, 0).UTC()) || event.Cursor() == "" {
+			t.Fatalf("recovered event %d differs from the committed public value", index)
+		}
+		cursor, err := adapter.decodeCursor(event.Cursor(), cursorDomainEvent, "crash-recovery", "")
+		if err != nil || cursor.position != uint64(index+1) || cursor.boundary != 0 || cursor.revisionID != "" || !cursor.revisionPublishedAt.IsZero() {
+			t.Fatalf("recovered event %d cursor = %#v, %v; want exact event cursor position %d", index, cursor, err, index+1)
+		}
 	}
 }
 

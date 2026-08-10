@@ -14,7 +14,7 @@ import (
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
 	"github.com/cadrena/policy-engine/store"
-	_ "modernc.org/sqlite"
+	moderncsqlite "modernc.org/sqlite"
 )
 
 const (
@@ -53,6 +53,9 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 		if err := writeSubprocessRecoveryFixture(adapter); err != nil {
 			t.Fatalf("write fixture: %v", err)
 		}
+		if err := enableSubprocessWALPersistence(adapter); err != nil {
+			t.Fatalf("preserve committed helper WAL: %v", err)
+		}
 		awaitSubprocessRelease(t, ready, release)
 		// Deliberately no adapter.Close: the following abrupt exit must retain
 		// the committed WAL for the parent recovery process.
@@ -74,6 +77,25 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 		}
 		awaitSubprocessRelease(t, ready, release)
 		// Deliberately no rollback/close: process death must expose no staged row.
+		os.Exit(0)
+	case "hold-raw-writer":
+		// This intentionally bypasses Cadrena's advisory sidecar. The parent
+		// checker must still receive SQLite BUSY while this external writer holds
+		// a real WAL write transaction.
+		database, err := sql.Open("sqlite", "file:"+path+"?mode=rw")
+		if err != nil {
+			t.Fatalf("sql.Open() error = %v", err)
+		}
+		conn, err := database.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("database.Conn() error = %v", err)
+		}
+		if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+			t.Fatalf("BEGIN IMMEDIATE error = %v", err)
+		}
+		awaitSubprocessRelease(t, ready, release)
+		// Abrupt exit releases an external SQLite writer without exercising any
+		// Cadrena lock or normal database close path.
 		os.Exit(0)
 	case "hold-runtime":
 		adapter, err := Open(config)
@@ -100,6 +122,34 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 	default:
 		t.Fatalf("unknown recovery subprocess mode %q", os.Getenv(sqliteRecoverySubprocessMode))
 	}
+}
+
+// enableSubprocessWALPersistence keeps the deliberately hot WAL sidecar after
+// the child uses os.Exit. It is test-fixture setup only: the parent must prove
+// that FullIntegrityCheck does not alter those bytes before Open recovers them.
+func enableSubprocessWALPersistence(adapter *Store) error {
+	if adapter == nil || adapter.db == nil {
+		return fmt.Errorf("nil store")
+	}
+	return adapter.db.write(context.Background(), func(_ context.Context, conn *sql.Conn) error {
+		if conn == nil {
+			return fmt.Errorf("nil writer connection")
+		}
+		return conn.Raw(func(driverConn any) error {
+			controller, ok := driverConn.(moderncsqlite.FileControl)
+			if !ok {
+				return fmt.Errorf("writer connection does not expose FileControl")
+			}
+			mode, err := controller.FileControlPersistWAL("main", 1)
+			if err != nil {
+				return fmt.Errorf("persist WAL file control: %w", err)
+			}
+			if mode != 1 {
+				return fmt.Errorf("persist WAL file control mode = %d, want 1", mode)
+			}
+			return nil
+		})
+	})
 }
 
 func awaitSubprocessRelease(t *testing.T, ready, release *os.File) {
@@ -195,7 +245,10 @@ func (p *sqliteRecoverySubprocess) releaseAndWait(t *testing.T) {
 	p.closed = true
 }
 
-func subprocessRecoveryRevision() (store.RevisionWrite, error) {
+// expectedSubprocessRecoveryRevision derives the assertion fixture separately
+// from the child writer below, so recovery checks cannot pass by sharing the
+// writer's construction path.
+func expectedSubprocessRecoveryRevision() (store.RevisionWrite, error) {
 	artifact, err := dsl.CompileArtifact("recovery.cdr", []byte("entity user {}"))
 	if err != nil {
 		return store.RevisionWrite{}, err
@@ -223,7 +276,7 @@ func subprocessRecoveryRevision() (store.RevisionWrite, error) {
 	return store.NewRevisionWriteWithProvenance(metadata, encoded, provenance)
 }
 
-func subprocessRecoveryDataRequest(revisionID string) (policyengine.WriteDataRequest, policyengine.TupleKey, error) {
+func expectedSubprocessRecoveryDataRequest(revisionID string) (policyengine.WriteDataRequest, policyengine.TupleKey, error) {
 	tupleValue := dsl.Tuple{
 		Resource: dsl.EntityRef{Type: "document", ID: "document"}, Relation: "viewer",
 		Subject: dsl.SubjectRef{Type: "user", ID: "subject"},
@@ -250,7 +303,33 @@ func writeSubprocessRecoveryFixture(adapter *Store) error {
 	if adapter == nil {
 		return fmt.Errorf("nil store")
 	}
-	revision, err := subprocessRecoveryRevision()
+	// Keep the child write construction independent from the expected fixture
+	// above; this makes reopen and crash recovery assertions true oracle checks.
+	artifact, err := dsl.CompileArtifact("recovery.cdr", []byte("entity user {}"))
+	if err != nil {
+		return err
+	}
+	encoded, err := artifact.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	id, err := policyengine.RevisionIDFromArtifact(artifact)
+	if err != nil {
+		return err
+	}
+	metadata, err := policyengine.NewRevisionMetadata("crash-recovery", id, time.Unix(10, 0).UTC())
+	if err != nil {
+		return err
+	}
+	publish, err := policyengine.NewPublishRequest("crash-recovery", "recovery.cdr", []byte("entity user {}"))
+	if err != nil {
+		return err
+	}
+	provenance, err := store.NewRevisionProvenance(publish)
+	if err != nil {
+		return err
+	}
+	revision, err := store.NewRevisionWriteWithProvenance(metadata, encoded, provenance)
 	if err != nil {
 		return err
 	}
@@ -264,7 +343,18 @@ func writeSubprocessRecoveryFixture(adapter *Store) error {
 	if _, err := adapter.Activate(context.Background(), activation); err != nil {
 		return err
 	}
-	request, _, err := subprocessRecoveryDataRequest(revision.Metadata().ID())
+	tupleValue := dsl.Tuple{
+		Resource: dsl.EntityRef{Type: "document", ID: "document"}, Relation: "viewer",
+		Subject: dsl.SubjectRef{Type: "user", ID: "subject"},
+	}
+	tuple, err := policyengine.NewRelationshipTuple(tupleValue, nil)
+	if err != nil {
+		return err
+	}
+	request, err := policyengine.NewWriteDataRequest(policyengine.WriteDataRequestInput{
+		Namespace: "crash-recovery", ValidationRevisionID: revision.Metadata().ID(), ExpectedGeneration: 0, IdempotencyKey: "crash-data",
+		TupleWrites: []policyengine.RelationshipTuple{tuple},
+	})
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 
@@ -57,6 +58,9 @@ func FullIntegrityCheck(ctx context.Context, config Config) (err error) {
 		return integrityResultError(ctx, err)
 	}
 	defer closeMigrationConnection(database, conn)
+	if err := persistIntegrityWAL(ctx, conn); err != nil {
+		return integrityResultError(ctx, err)
+	}
 	if err := verifyConnectionPragmas(ctx, conn, config, false); err != nil {
 		return integrityResultError(ctx, err)
 	}
@@ -66,6 +70,12 @@ func FullIntegrityCheck(ctx context.Context, config Config) (err error) {
 	defer func() {
 		_ = rollbackMigration(conn)
 	}()
+	// Revalidate after SQLite has excluded independent writers. The preflight
+	// above prevents SQLite from interpreting a malformed sidecar while opening;
+	// this locked pass binds the complete scan to the exact WAL bytes it reads.
+	if err := validateWALFile(ctx, config.Path); err != nil {
+		return integrityResultError(ctx, err)
+	}
 
 	if err := fullIntegrityCheck(ctx, conn); err != nil {
 		return integrityResultError(ctx, err)
@@ -153,6 +163,33 @@ func openExistingIntegrityConnection(ctx context.Context, config Config) (*sql.D
 		return nil, nil, mapError(ctx, err)
 	}
 	return database, conn, nil
+}
+
+// persistIntegrityWAL prevents the checker connection's final close from
+// checkpointing or deleting a hot WAL that it merely inspected. The setting is
+// deliberately not reset: resetting it on the final connection can perform the
+// very close-time cleanup this offline checker is forbidden to cause.
+func persistIntegrityWAL(ctx context.Context, conn *sql.Conn) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if conn == nil {
+		return sqliteError(policyengine.ErrorIntegrity)
+	}
+	return conn.Raw(func(driverConn any) error {
+		controller, ok := driverConn.(moderncsqlite.FileControl)
+		if !ok {
+			return sqliteError(policyengine.ErrorIntegrity)
+		}
+		mode, err := controller.FileControlPersistWAL("main", 1)
+		if err != nil {
+			return err
+		}
+		if mode != 1 {
+			return sqliteError(policyengine.ErrorIntegrity)
+		}
+		return nil
+	})
 }
 
 // integrityDSN deliberately omits _journal_mode. An integrity check must
@@ -704,10 +741,28 @@ func validateFullSlotHeads(ctx context.Context, conn *sql.Conn, heads map[string
 }
 
 func validateFullHistoryHeads(history map[integrityHistoryKey]integritySlotRecord, slots map[integritySlotKey]integritySlotRecord) error {
+	retained := make(map[integritySlotKey][]uint64, len(slots))
 	for key := range history {
-		head, exists := slots[integritySlotKey{namespace: key.namespace, slot: key.slot}]
+		slotKey := integritySlotKey{namespace: key.namespace, slot: key.slot}
+		head, exists := slots[slotKey]
 		if !exists || key.generation > head.activation.Generation() {
 			return sqliteError(policyengine.ErrorIntegrity)
+		}
+		retained[slotKey] = append(retained[slotKey], key.generation)
+	}
+	for slotKey, head := range slots {
+		generations := retained[slotKey]
+		if len(generations) == 0 {
+			return sqliteError(policyengine.ErrorIntegrity)
+		}
+		sort.Slice(generations, func(left, right int) bool { return generations[left] < generations[right] })
+		if generations[len(generations)-1] != head.activation.Generation() {
+			return sqliteError(policyengine.ErrorIntegrity)
+		}
+		for index := 1; index < len(generations); index++ {
+			if generations[index] != generations[index-1]+1 {
+				return sqliteError(policyengine.ErrorIntegrity)
+			}
 		}
 	}
 	return nil
@@ -932,6 +987,7 @@ func validateFullIdempotency(ctx context.Context, conn *sql.Conn, heads map[stri
 		return mapError(ctx, err)
 	}
 	defer func() { _ = rows.Close() }()
+	generationResponses := make(map[string]map[uint64]struct{}, len(heads))
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
 			return err
@@ -955,9 +1011,23 @@ func validateFullIdempotency(ctx context.Context, conn *sql.Conn, heads map[stri
 		if err != nil || decoded.Generation() > uint64(head.dataGeneration) {
 			return sqliteError(policyengine.ErrorIntegrity)
 		}
+		responses := generationResponses[namespace]
+		if responses == nil {
+			responses = make(map[uint64]struct{})
+			generationResponses[namespace] = responses
+		}
+		if _, exists := responses[decoded.Generation()]; exists {
+			return sqliteError(policyengine.ErrorIntegrity)
+		}
+		responses[decoded.Generation()] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
 		return mapError(ctx, err)
+	}
+	for namespace, head := range heads {
+		if uint64(len(generationResponses[namespace])) != uint64(head.dataGeneration) {
+			return sqliteError(policyengine.ErrorIntegrity)
+		}
 	}
 	return nil
 }
