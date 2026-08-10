@@ -12,9 +12,7 @@ import (
 	"github.com/cadrena/policy-engine/store"
 )
 
-// Store composes the durable lifecycle capabilities implemented so far. It is
-// intentionally not exposed through a production Open function until every
-// Store capability is available.
+// Store composes the durable local storage capabilities.
 type Store struct {
 	db                         *database
 	activationHistoryRetention int
@@ -22,19 +20,39 @@ type Store struct {
 	closeOnce                  sync.Once
 	closeErr                   error
 	revisions                  revisionReservationSet
+	generations                generationWaitSet
 }
 
-var (
-	_ store.RevisionStore = (*Store)(nil)
-	_ store.SlotStore     = (*Store)(nil)
-	_ store.EventStore    = (*Store)(nil)
-)
+var _ store.Store = (*Store)(nil)
+
+// Open opens one existing, fully migrated durable policy store. It never
+// creates a database, applies migrations, or repairs durable state.
+func Open(config Config) (*Store, error) {
+	ctx := context.Background()
+	database, err := openExistingDatabase(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	// Retain the runtime shared lock while validating. That prevents an
+	// exclusive migration from changing the durable schema between validation
+	// and the lifetime that will serve public requests.
+	if err := ValidateSchema(ctx, config); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	result, err := newStoreFromDatabase(ctx, database)
+	if err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return result, nil
+}
 
 func openMigratedStore(ctx context.Context, config Config) (*Store, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
-	database, err := openDatabase(ctx, config)
+	database, err := openExistingDatabase(ctx, config)
 	if err != nil {
 		return nil, err
 	}

@@ -39,6 +39,16 @@ func openDatabase(ctx context.Context, config Config) (*database, error) {
 }
 
 func openDatabaseWithConnectorFactory(ctx context.Context, config Config, newConnector connectorFactory) (_ *database, err error) {
+	return openDatabaseWithConnectorFactoryMode(ctx, config, newConnector, true)
+}
+
+// openExistingDatabase opens a pre-existing database without allowing SQLite
+// to create a replacement file if it disappears after schema validation.
+func openExistingDatabase(ctx context.Context, config Config) (*database, error) {
+	return openDatabaseWithConnectorFactoryMode(ctx, config, moderncsqlite.NewConnector, false)
+}
+
+func openDatabaseWithConnectorFactoryMode(ctx context.Context, config Config, newConnector connectorFactory, create bool) (_ *database, err error) {
 	if newConnector == nil {
 		return nil, sqliteError(policyengine.ErrorInvalidArgument)
 	}
@@ -47,6 +57,17 @@ func openDatabaseWithConnectorFactory(ctx context.Context, config Config, newCon
 	}
 	if err := config.validate(); err != nil {
 		return nil, err
+	}
+	// A public existing-only open must not leave even an advisory-lock sidecar
+	// behind for a path that does not name a durable database.
+	if !create {
+		exists, statErr := sqliteDatabaseExists(config.Path)
+		if statErr != nil {
+			return nil, mapError(ctx, statErr)
+		}
+		if !exists {
+			return nil, sqliteError(policyengine.ErrorFailedPrecondition)
+		}
 	}
 
 	lock, err := newAdvisoryLock(config.Path)
@@ -69,11 +90,21 @@ func openDatabaseWithConnectorFactory(ctx context.Context, config Config, newCon
 			_ = database.closeResources()
 		}
 	}()
-	if err := ensureOwnerOnlyDatabaseFile(config.Path); err != nil {
-		return nil, mapError(ctx, err)
+	if create {
+		if err := ensureOwnerOnlyDatabaseFile(config.Path); err != nil {
+			return nil, mapError(ctx, err)
+		}
+	} else {
+		exists, statErr := sqliteDatabaseExists(config.Path)
+		if statErr != nil {
+			return nil, mapError(ctx, statErr)
+		}
+		if !exists {
+			return nil, sqliteError(policyengine.ErrorFailedPrecondition)
+		}
 	}
 
-	writerConnector, err := newConnector(databaseDSN(config, false))
+	writerConnector, err := newConnector(databaseDSNMode(config, false, create))
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
@@ -89,7 +120,7 @@ func openDatabaseWithConnectorFactory(ctx context.Context, config Config, newCon
 		return nil, err
 	}
 
-	readerConnector, err := newConnector(databaseDSN(config, true))
+	readerConnector, err := newConnector(databaseDSNMode(config, true, create))
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
@@ -160,6 +191,10 @@ func ensureOwnerOnlyDatabaseFile(path string) error {
 }
 
 func databaseDSN(config Config, reader bool) string {
+	return databaseDSNMode(config, reader, true)
+}
+
+func databaseDSNMode(config Config, reader, create bool) string {
 	uri := &url.URL{Scheme: "file", Path: config.Path}
 	query := url.Values{}
 	query.Set("_busy_timeout", strconv.FormatInt(config.BusyTimeout.Milliseconds(), 10))
@@ -167,8 +202,14 @@ func databaseDSN(config Config, reader bool) string {
 	query.Set("_synchronous", string(config.Synchronous))
 	if reader {
 		query.Set("_query_only", "1")
+		if !create {
+			query.Set("mode", "ro")
+		}
 	} else {
 		query.Set("_journal_mode", "WAL")
+		if !create {
+			query.Set("mode", "rw")
+		}
 	}
 	uri.RawQuery = query.Encode()
 	return uri.String()

@@ -15,11 +15,12 @@ import (
 // revisionLifecycleObserver is an optional, instance-local lifecycle observer.
 // It cannot return an error or change storage results. The nil default has no
 // behavior; package tests install a channel-backed observer for deterministic
-// contention checks only.
+// contention and pre-admission ordering checks only.
 type revisionLifecycleObserver interface {
 	ownerEntered(context.Context)
 	contended()
 	waiterWoke(context.Context)
+	dataPreAdmission(context.Context)
 }
 
 type revisionReservationSet struct {
@@ -80,6 +81,21 @@ func (s *Store) releaseRevisionReservation(namespace string, reservation *revisi
 		close(reservation.done)
 	}
 	s.revisions.mu.Unlock()
+}
+
+// takeDataPreAdmissionObserver consumes the existing private lifecycle seam
+// for one validated WriteData call. It is deliberately instance-local and
+// nil-by-default; the observer can only delay a test call and cannot alter
+// storage errors, values, or commit ordering.
+func (s *Store) takeDataPreAdmissionObserver() revisionLifecycleObserver {
+	if s == nil {
+		return nil
+	}
+	s.revisions.mu.Lock()
+	observer := s.revisions.observer
+	s.revisions.observer = nil
+	s.revisions.mu.Unlock()
+	return observer
 }
 
 // PutRevision verifies and atomically stores one immutable content-addressed
