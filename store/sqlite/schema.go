@@ -48,6 +48,19 @@ type schemaTableSpec struct {
 	foreignKeys []schemaForeignKeySpec
 }
 
+type ddlTokenKind uint8
+
+const (
+	ddlTokenWord ddlTokenKind = iota
+	ddlTokenQuoted
+	ddlTokenSymbol
+)
+
+type ddlToken struct {
+	kind ddlTokenKind
+	text string
+}
+
 var schemaV1Objects = map[string]schemaObjectSpec{
 	"cadrena_meta":                         {kind: "table", table: "cadrena_meta"},
 	"namespace_heads":                      {kind: "table", table: "namespace_heads"},
@@ -335,13 +348,192 @@ func validateTableChecks(ctx context.Context, conn *sql.Conn, table string, chec
 	if err != nil {
 		return schemaValidationError(ctx, err)
 	}
-	normalized := strings.Join(strings.Fields(strings.ToUpper(ddl)), " ")
+	tokens, err := canonicalDDLTokens(ddl)
+	if err != nil {
+		return sqliteError(policyengine.ErrorIntegrity)
+	}
 	for _, check := range checks {
-		if !strings.Contains(normalized, check) {
+		expression, ok := canonicalCheckExpression(check)
+		if !ok || !containsCanonicalCheck(tokens, expression) {
 			return sqliteError(policyengine.ErrorIntegrity)
 		}
 	}
 	return nil
+}
+
+func canonicalDDLTokens(ddl string) ([]ddlToken, error) {
+	tokens := make([]ddlToken, 0, len(ddl)/4)
+	for index := 0; index < len(ddl); {
+		switch {
+		case isSQLiteSpace(ddl[index]):
+			index++
+		case hasPrefixAt(ddl, index, "--"):
+			index = skipSQLiteLineComment(ddl, index+2)
+		case hasPrefixAt(ddl, index, "/*"):
+			end := strings.Index(ddl[index+2:], "*/")
+			if end < 0 {
+				return nil, sqliteError(policyengine.ErrorIntegrity)
+			}
+			index += end + 4
+		case ddl[index] == '\'' || ddl[index] == '"' || ddl[index] == '`':
+			end, ok := skipSQLiteDelimitedToken(ddl, index, ddl[index])
+			if !ok {
+				return nil, sqliteError(policyengine.ErrorIntegrity)
+			}
+			tokens = append(tokens, ddlToken{kind: ddlTokenQuoted})
+			index = end
+		case ddl[index] == '[':
+			end, ok := skipSQLiteBracketIdentifier(ddl, index)
+			if !ok {
+				return nil, sqliteError(policyengine.ErrorIntegrity)
+			}
+			tokens = append(tokens, ddlToken{kind: ddlTokenQuoted})
+			index = end
+		case isSQLiteBareTokenByte(ddl[index]):
+			end := index + 1
+			for end < len(ddl) && isSQLiteBareTokenByte(ddl[end]) {
+				end++
+			}
+			tokens = append(tokens, ddlToken{kind: ddlTokenWord, text: strings.ToUpper(ddl[index:end])})
+			index = end
+		default:
+			width := 1
+			if index+1 < len(ddl) && isSQLiteTwoByteOperator(ddl[index:index+2]) {
+				width = 2
+			}
+			tokens = append(tokens, ddlToken{kind: ddlTokenSymbol, text: ddl[index : index+width]})
+			index += width
+		}
+	}
+	return tokens, nil
+}
+
+func canonicalCheckExpression(check string) ([]ddlToken, bool) {
+	tokens, err := canonicalDDLTokens(check)
+	if err != nil || len(tokens) < 4 || !isDDLWord(tokens[0], "CHECK") || !isDDLSymbol(tokens[1], "(") {
+		return nil, false
+	}
+	end, ok := matchingDDLParenthesis(tokens, 1)
+	if !ok || end != len(tokens)-1 || end == 2 {
+		return nil, false
+	}
+	return tokens[2:end], true
+}
+
+func containsCanonicalCheck(tokens, expression []ddlToken) bool {
+	for index := 0; index+2 < len(tokens); index++ {
+		if !isDDLWord(tokens[index], "CHECK") || !isDDLSymbol(tokens[index+1], "(") {
+			continue
+		}
+		end, ok := matchingDDLParenthesis(tokens, index+1)
+		if !ok {
+			return false
+		}
+		if equalDDLTokenSlices(tokens[index+2:end], expression) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchingDDLParenthesis(tokens []ddlToken, open int) (int, bool) {
+	depth := 0
+	for index := open; index < len(tokens); index++ {
+		switch {
+		case isDDLSymbol(tokens[index], "("):
+			depth++
+		case isDDLSymbol(tokens[index], ")"):
+			depth--
+			if depth == 0 {
+				return index, true
+			}
+			if depth < 0 {
+				return 0, false
+			}
+		}
+	}
+	return 0, false
+}
+
+func equalDDLTokenSlices(left, right []ddlToken) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func isDDLWord(token ddlToken, word string) bool {
+	return token.kind == ddlTokenWord && token.text == word
+}
+
+func isDDLSymbol(token ddlToken, symbol string) bool {
+	return token.kind == ddlTokenSymbol && token.text == symbol
+}
+
+func isSQLiteSpace(value byte) bool {
+	switch value {
+	case ' ', '\t', '\n', '\r', '\f':
+		return true
+	default:
+		return false
+	}
+}
+
+func hasPrefixAt(value string, index int, prefix string) bool {
+	return len(value)-index >= len(prefix) && value[index:index+len(prefix)] == prefix
+}
+
+func skipSQLiteLineComment(value string, index int) int {
+	for index < len(value) && value[index] != '\n' && value[index] != '\r' {
+		index++
+	}
+	return index
+}
+
+func skipSQLiteDelimitedToken(value string, index int, delimiter byte) (int, bool) {
+	for index++; index < len(value); index++ {
+		if value[index] != delimiter {
+			continue
+		}
+		if index+1 < len(value) && value[index+1] == delimiter {
+			index++
+			continue
+		}
+		return index + 1, true
+	}
+	return 0, false
+}
+
+func skipSQLiteBracketIdentifier(value string, index int) (int, bool) {
+	for index++; index < len(value); index++ {
+		if value[index] != ']' {
+			continue
+		}
+		if index+1 < len(value) && value[index+1] == ']' {
+			index++
+			continue
+		}
+		return index + 1, true
+	}
+	return 0, false
+}
+
+func isSQLiteBareTokenByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_' || value == '$' || value >= 0x80
+}
+
+func isSQLiteTwoByteOperator(value string) bool {
+	switch value {
+	case ">=", "<=", "<>", "!=", "==", "||", "<<", ">>":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateTableForeignKeys(ctx context.Context, conn *sql.Conn, table string, expected []schemaForeignKeySpec) error {

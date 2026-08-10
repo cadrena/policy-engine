@@ -157,6 +157,113 @@ func TestValidateSchemaRejectsMissingRequiredIndex(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaRejectsRequiredCheckTextOnlyInComments(t *testing.T) {
+	// This catches a validator that searches stored DDL text: SQLite preserves
+	// comments, so a fake CHECK inside one must not satisfy a real constraint.
+	for _, comment := range []struct {
+		name string
+		text string
+	}{
+		{name: "block comment", text: "/* CHECK (GENERATION > 0) */"},
+		{name: "line comment", text: "-- CHECK (GENERATION > 0)"},
+	} {
+		t.Run(comment.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "policy.db")
+			config := validConfig(path)
+			if _, err := ApplyMigrations(context.Background(), config); err != nil {
+				t.Fatalf("ApplyMigrations() error = %v", err)
+			}
+			db := openRawSQLite(t, path)
+			mustExecMigrationTest(t, db, "DROP TABLE slot_heads")
+			mustExecMigrationTest(t, db, "CREATE TABLE slot_heads (\n"+
+				"namespace TEXT NOT NULL,\n"+
+				"slot TEXT NOT NULL,\n"+
+				"revision_id TEXT NOT NULL,\n"+
+				"generation INTEGER NOT NULL, "+comment.text+"\n"+
+				"activated_at_ns INTEGER NOT NULL,\n"+
+				"PRIMARY KEY (namespace, slot),\n"+
+				"FOREIGN KEY (namespace, revision_id) REFERENCES revisions(namespace, revision_id)\n"+
+				")")
+			if err := db.Close(); err != nil {
+				t.Fatalf("close damaged database: %v", err)
+			}
+
+			if err := ValidateSchema(context.Background(), config); categoryOf(err) != policyengine.ErrorIntegrity {
+				t.Fatalf("ValidateSchema() category = %v, want %v", categoryOf(err), policyengine.ErrorIntegrity)
+			}
+		})
+	}
+}
+
+func TestValidateSchemaRejectsRequiredCheckTextOnlyInQuotedConstraintName(t *testing.T) {
+	// This catches a normalizer that turns quoted identifier content into SQL
+	// keywords, treating a constraint name as the required CHECK expression.
+	for _, quote := range []struct {
+		name string
+		text string
+	}{
+		{name: "double quote", text: "\"CHECK (GENERATION > 0)\""},
+		{name: "single quote", text: "'CHECK (GENERATION > 0)'"},
+		{name: "backtick", text: "`CHECK (GENERATION > 0)`"},
+		{name: "bracket", text: "[CHECK (GENERATION > 0)]"},
+	} {
+		t.Run(quote.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "policy.db")
+			config := validConfig(path)
+			if _, err := ApplyMigrations(context.Background(), config); err != nil {
+				t.Fatalf("ApplyMigrations() error = %v", err)
+			}
+			db := openRawSQLite(t, path)
+			mustExecMigrationTest(t, db, "DROP TABLE slot_heads")
+			mustExecMigrationTest(t, db, "CREATE TABLE slot_heads (\n"+
+				"namespace TEXT NOT NULL,\n"+
+				"slot TEXT NOT NULL,\n"+
+				"revision_id TEXT NOT NULL,\n"+
+				"generation INTEGER NOT NULL,\n"+
+				"activated_at_ns INTEGER NOT NULL,\n"+
+				"PRIMARY KEY (namespace, slot),\n"+
+				"FOREIGN KEY (namespace, revision_id) REFERENCES revisions(namespace, revision_id),\n"+
+				"CONSTRAINT "+quote.text+" UNIQUE (namespace, slot)\n"+
+				")")
+			if err := db.Close(); err != nil {
+				t.Fatalf("close damaged database: %v", err)
+			}
+
+			if err := ValidateSchema(context.Background(), config); categoryOf(err) != policyengine.ErrorIntegrity {
+				t.Fatalf("ValidateSchema() category = %v, want %v", categoryOf(err), policyengine.ErrorIntegrity)
+			}
+		})
+	}
+}
+
+func TestValidateSchemaRejectsAlteredRequiredCheck(t *testing.T) {
+	// This catches accepting a superficially similar check whose weakened
+	// operator changes the required positive-generation invariant.
+	path := filepath.Join(t.TempDir(), "policy.db")
+	config := validConfig(path)
+	if _, err := ApplyMigrations(context.Background(), config); err != nil {
+		t.Fatalf("ApplyMigrations() error = %v", err)
+	}
+	db := openRawSQLite(t, path)
+	mustExecMigrationTest(t, db, "DROP TABLE slot_heads")
+	mustExecMigrationTest(t, db, "CREATE TABLE slot_heads (\n"+
+		"namespace TEXT NOT NULL,\n"+
+		"slot TEXT NOT NULL,\n"+
+		"revision_id TEXT NOT NULL,\n"+
+		"generation INTEGER NOT NULL CHECK (generation >= 0),\n"+
+		"activated_at_ns INTEGER NOT NULL,\n"+
+		"PRIMARY KEY (namespace, slot),\n"+
+		"FOREIGN KEY (namespace, revision_id) REFERENCES revisions(namespace, revision_id)\n"+
+		")")
+	if err := db.Close(); err != nil {
+		t.Fatalf("close damaged database: %v", err)
+	}
+
+	if err := ValidateSchema(context.Background(), config); categoryOf(err) != policyengine.ErrorIntegrity {
+		t.Fatalf("ValidateSchema() category = %v, want %v", categoryOf(err), policyengine.ErrorIntegrity)
+	}
+}
+
 type schemaObjectForTest struct {
 	objectType string
 	table      string
