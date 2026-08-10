@@ -363,6 +363,22 @@ check, and clean-status check. A post-target `git status --short --branch` and
 `git diff --check` were also clean. This evidence is informational only and
 does not replace the fresh reviews required below.
 
+### Post-NOFOLLOW-evidence aggregate gate
+
+Evidence commit `7c953d7`, which records the implementation candidate and its
+committed-input gate, also passed the exact post-evidence aggregate target from
+`2026-08-10T09:00:26Z` through `2026-08-10T09:01:08Z` on a clean worktree:
+
+```text
+rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final
+```
+
+It again completed focused repetitions, normal and race suites, scoped fork
+vet, module verification, format/lint/generation, manifest verification,
+boundary checks, vulnerability scan, gitleaks, whitespace diff check, and
+clean-status check. This post-evidence PASS is evidence only; it does not
+replace either required fresh review or change the terminal blocked decision.
+
 ## Review state and non-goals
 
 | scope | fresh review verdict |
