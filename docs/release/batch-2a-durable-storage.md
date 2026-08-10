@@ -427,6 +427,14 @@ format/lint/generation, SQLite no-follow manifest, public-boundary,
 vulnerability, and clean-diff/status checks. Gitleaks passed both the directory
 scan and its 66-commit history scan with no leaks.
 
+### Post-authorization-evidence aggregate
+
+On `d73fb51`, the same exact aggregate command passed from
+`2026-08-10T09:19:11Z` through `2026-08-10T09:21:30Z`, including the SQLite
+no-follow manifest, directory gitleaks scan, and 67-commit gitleaks history
+scan with no leaks. Its final diff/status checks were clean. This lightweight
+record is documentation-only and is not a Batch 2B start.
+
 No production code is changed by this review-closure cleanup. The fresh
 reviews and clean whole-branch re-review authorize the next batch to be
 considered; they do not create a Batch 2B branch, tag, artifact, or execution.
