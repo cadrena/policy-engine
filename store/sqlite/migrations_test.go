@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -117,6 +118,34 @@ func TestApplyMigrationsCreatesSchemaAndExactLedgerRecord(t *testing.T) {
 	}
 	if appliedAt != "1970-01-01T00:00:00Z" {
 		t.Fatalf("ledger applied_at = %q, want UTC RFC3339Nano fixed-clock value", appliedAt)
+	}
+}
+
+func TestInitialMigrationCreatesExactlyOnePersistentCursorKey(t *testing.T) {
+	// This catches migration code that defers key generation to runtime opening,
+	// creates an invalid key, or rotates the key on an idempotent migration run.
+	path := filepath.Join(t.TempDir(), "policy.db")
+	config := validConfig(path)
+	if _, err := ApplyMigrations(context.Background(), config); err != nil {
+		t.Fatalf("first ApplyMigrations() error = %v", err)
+	}
+	db := openRawSQLite(t, path)
+	var first []byte
+	if err := db.QueryRowContext(context.Background(), "SELECT value FROM cadrena_meta WHERE key = 'cursor_hmac_key'").Scan(&first); err != nil {
+		t.Fatalf("read initial cursor key: %v", err)
+	}
+	if len(first) != 32 {
+		t.Fatalf("cursor key length = %d, want 32", len(first))
+	}
+	if _, err := ApplyMigrations(context.Background(), config); err != nil {
+		t.Fatalf("second ApplyMigrations() error = %v", err)
+	}
+	var second []byte
+	if err := db.QueryRowContext(context.Background(), "SELECT value FROM cadrena_meta WHERE key = 'cursor_hmac_key'").Scan(&second); err != nil {
+		t.Fatalf("read persisted cursor key: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("idempotent migration rotated persistent cursor key")
 	}
 }
 

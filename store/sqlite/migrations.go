@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"embed"
@@ -20,6 +21,8 @@ import (
 )
 
 const schemaMigrationsTable = "schema_migrations"
+
+const cursorKeyMetaKey = "cursor_hmac_key"
 
 const createSchemaMigrations = `CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -180,6 +183,11 @@ func applyMigrationsWith(ctx context.Context, config Config, migrations []migrat
 		if _, err := conn.ExecContext(ctx, string(pending.SQL)); err != nil {
 			return MigrationResult{}, mapError(ctx, err)
 		}
+		if pending.Version == 1 && pending.Name == "initial" {
+			if err := seedInitialCursorKey(ctx, conn); err != nil {
+				return MigrationResult{}, err
+			}
+		}
 		if _, err := conn.ExecContext(
 			ctx,
 			"INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
@@ -201,6 +209,18 @@ func applyMigrationsWith(ctx context.Context, config Config, migrations []migrat
 	}
 	committed = true
 	return result, nil
+}
+
+func seedInitialCursorKey(ctx context.Context, conn *sql.Conn) error {
+	var key [32]byte
+	written, err := rand.Read(key[:])
+	if err != nil || written != len(key) {
+		return sqliteError(policyengine.ErrorInternal)
+	}
+	if _, err := conn.ExecContext(ctx, "INSERT INTO cadrena_meta(key, value) VALUES (?, ?)", cursorKeyMetaKey, key[:]); err != nil {
+		return mapError(ctx, err)
+	}
+	return nil
 }
 
 // ValidateSchema verifies that a fully migrated database has the expected
