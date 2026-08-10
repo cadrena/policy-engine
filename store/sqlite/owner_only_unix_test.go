@@ -24,7 +24,7 @@ func TestOwnerOnlySetupRejectsSymlinkAndNonRegularTargets(t *testing.T) {
 	}{
 		{
 			name: "lock symlink",
-			run: func(t *testing.T, path string) error {
+			run: func(_ *testing.T, path string) error {
 				lock, err := newAdvisoryLock(path)
 				if lock != nil {
 					_ = lock.Close()
@@ -35,7 +35,7 @@ func TestOwnerOnlySetupRejectsSymlinkAndNonRegularTargets(t *testing.T) {
 		},
 		{
 			name: "database symlink",
-			run: func(t *testing.T, path string) error {
+			run: func(_ *testing.T, path string) error {
 				_, err := ApplyMigrations(context.Background(), validConfig(path))
 				return err
 			},
@@ -43,7 +43,7 @@ func TestOwnerOnlySetupRejectsSymlinkAndNonRegularTargets(t *testing.T) {
 		},
 		{
 			name: "lock directory",
-			run: func(t *testing.T, path string) error {
+			run: func(_ *testing.T, path string) error {
 				lock, err := newAdvisoryLock(path)
 				if lock != nil {
 					_ = lock.Close()
@@ -54,7 +54,7 @@ func TestOwnerOnlySetupRejectsSymlinkAndNonRegularTargets(t *testing.T) {
 		},
 		{
 			name: "database directory",
-			run: func(t *testing.T, path string) error {
+			run: func(_ *testing.T, path string) error {
 				_, err := ApplyMigrations(context.Background(), validConfig(path))
 				return err
 			},

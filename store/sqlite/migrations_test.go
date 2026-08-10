@@ -147,7 +147,7 @@ func TestApplyMigrationsRejectsPanicAndZeroClocksWithoutDurableLedger(t *testing
 			config := validConfig(path)
 			config.Clock = tc.clock
 
-			_, err, panicValue := applyMigrationsWithoutPanic(config)
+			_, panicValue, err := applyMigrationsWithoutPanic(config)
 			if panicValue != nil {
 				t.Fatalf("ApplyMigrations() panicked: %v", panicValue)
 			}
@@ -388,10 +388,10 @@ type migrationClockFunc func() time.Time
 
 func (f migrationClockFunc) Now() time.Time { return f() }
 
-func applyMigrationsWithoutPanic(config Config) (result MigrationResult, err error, panicValue any) {
+func applyMigrationsWithoutPanic(config Config) (result MigrationResult, panicValue any, err error) {
 	defer func() { panicValue = recover() }()
 	result, err = ApplyMigrations(context.Background(), config)
-	return result, err, nil
+	return result, nil, err
 }
 
 func openRawSQLite(t *testing.T, path string) *sql.DB {
