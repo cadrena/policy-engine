@@ -2,11 +2,12 @@
 
 ## Decision
 
-The implementation and repository gates passed on candidate
-`c81ccabe5af4901027dc5ab68ea87cf00dfa650c`. The only remaining gates are the
-required fresh Task 6 review and the required fresh whole-branch review. Those
-reviews have not occurred, so this document intentionally records a blocked
-decision rather than inferring authorization from the test results.
+The original implementation and repository gates passed on candidate
+`c81ccabe5af4901027dc5ab68ea87cf00dfa650c`; the corrective Task 6 gate passed
+on `affc22304524f9afb48c2321a9c73abbfeac54f3`. The only remaining gates are
+the required fresh Task 6 review and the required fresh whole-branch review.
+Those reviews have not occurred, so this document intentionally records a
+blocked decision rather than inferring authorization from the test results.
 
 ## Candidate and commit chain
 
@@ -19,7 +20,7 @@ Merge base: `846fb7b0a6bb24eff31d350d727b0ff68ea3f9a9`.
 | 3 | `62cdd9b`, `a2fc373` |
 | 4 | `bbb84a1`, `6d8151a` |
 | 5 | `b079ed0`, `b3e1e1b`, `44494d5` |
-| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist) |
+| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist), `cf4765` (initial blocked evidence), `affc223` (corrective integrity invariants and WAL preservation) |
 
 The implementation candidate used for the final green gate was
 `c81ccabe5af4901027dc5ab68ea87cf00dfa650c`.
@@ -133,12 +134,88 @@ rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 go test . ./internal/app ./
 The first vulnerability and secret runs performed dependency bootstrap; the
 definitive warmed reruns are the passing results recorded in the final gate.
 
+## Corrective Task 6 integrity follow-up
+
+This corrective record follows the initial blocked evidence commit `cf4765`
+and the implementation fix
+`affc22304524f9afb48c2321a9c73abbfeac54f3`. It changes no authorization
+decision.
+
+The corrective implementation enforces these durable relations during the
+offline full check:
+
+- each namespace data generation in the closed interval `1..data_generation`
+  has exactly one decoded durable idempotency response, with no duplicate
+  generation under a different key;
+- retained activation rows are a sorted, consecutive suffix ending exactly at
+  the slot-head generation; a legitimately pruned prefix remains allowed;
+- the checker opens one original source connection, asserts the pinned
+  `modernc.org/sqlite v1.56.0` `FileControl` interface, sets
+  `FileControlPersistWAL("main", 1)` before `BEGIN EXCLUSIVE`, revalidates the
+  now-locked WAL, scans in that transaction, rolls back, and closes without
+  restoring the close-time persistence mode.
+
+The last point is deliberate: restoring the mode on the final checker
+connection can cause the prohibited close-time cleanup. The test fixture keeps
+a committed WAL hot after abrupt child exit. It snapshots both `-wal` and
+`-shm` before and after the checker, requires the WAL bytes to be identical,
+requires any pre-existing SHM sidecar to remain present and non-empty, then
+opens the original database directly and verifies complete recovered public
+state. Exact SHM byte equality is not a durable-state contract: SQLite may
+refresh WAL-index and lock bookkeeping while acquiring `BEGIN EXCLUSIVE`; the
+unchanged WAL plus successful fresh recovery is the relevant no-checkpoint
+proof.
+
+The strengthened crash/reopen oracle derives its expected revision and data
+fixture independently of the writer path and compares all public values:
+revision namespace/ID/publication time/artifact/provenance/digest, complete
+activation including time, data generation and idempotent replay, snapshot and
+complete tuple result, and every event's namespace, cursor semantics, kind,
+payload-derived fields, generation, and timestamp. A subprocess raw SQLite
+`BEGIN IMMEDIATE` writer that does not hold Cadrena's advisory sidecar now
+also proves the original source `BEGIN EXCLUSIVE` returns `UNAVAILABLE` while
+contended and succeeds after the writer exits.
+
+### Corrective TDD record
+
+The relation RED probe first reported five failures: the containing table plus
+the four newly uncovered gaps (activation history `{1,3}`, missing idempotency
+generation, duplicate idempotency generation under a second key, and a
+non-contiguous idempotency sequence). The hot-WAL probe first showed that the
+old checker deleted the durable `-wal` at close. Enabling the supported file
+control on the original checker connection made the WAL preservation test
+green; the test intentionally permits transient SHM bookkeeping changes for
+the reason stated above. The contiguous pruned history acceptance fixture and
+the subprocess raw-writer contention fixture both pass.
+
+### Committed-input corrective gate
+
+Candidate `affc22304524f9afb48c2321a9c73abbfeac54f3` was clean before the
+gate. The aggregate target ran with command-local module verification in the
+UTC window `2026-08-10T04:59:10Z` through `2026-08-10T05:01:53Z` and exited 0:
+
+```text
+rtk run 'env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final'
+```
+
+The target reported `go1.25.12 darwin/arm64`, repeated approval binding,
+SQLite/conformance/CLI, and integrity/recovery tests, then completed the
+complete `-count=3` suite, full race suite, vet, module verification,
+format/lint/generation, boundary checks, vulnerability scan, gitleaks,
+whitespace diff check, and clean-status check. Post-target
+`rtk git status --short --branch` was clean and `rtk git diff --check` passed.
+
+Deferred minor: `.gitleaksignore` contains an exact SDD fingerprint and is
+safe in scope, but it couples secret-scanning policy to an ignored artifact.
+It remains unchanged in this corrective fix and should be reconsidered during
+the fresh evidence review.
+
 ## Review state and non-goals
 
 | scope | fresh review verdict |
 | --- | --- |
 | Tasks 1–5 | clean according to their recorded implementation-ledger reviews |
-| Task 6 | pending — not yet performed |
+| Task 6 | pending — corrective `affc223` has not yet received a fresh review |
 | Full Task 1–6 branch/evidence | pending — not yet performed |
 
 The two pending reviews above are the sole blockers. This work creates no tag,
