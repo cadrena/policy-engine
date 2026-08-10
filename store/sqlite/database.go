@@ -268,7 +268,7 @@ func verifyWriterConnection(ctx context.Context, database *sql.DB, config Config
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return verifyConnectionPragmas(ctx, conn, config, false)
 }
 

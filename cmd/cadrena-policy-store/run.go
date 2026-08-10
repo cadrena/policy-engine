@@ -59,9 +59,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return writeCLIResultError(stderr, err)
 		}
-		fmt.Fprintf(stdout, "CURRENT %d\n", plan.Current)
+		_, _ = fmt.Fprintf(stdout, "CURRENT %d\n", plan.Current)
 		for _, pending := range plan.Pending {
-			fmt.Fprintf(stdout, "PENDING %d\n", pending.Version)
+			_, _ = fmt.Fprintf(stdout, "PENDING %d\n", pending.Version)
 		}
 		return 0
 	case "migrate":
@@ -70,15 +70,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return writeCLIResultError(stderr, err)
 		}
 		for _, applied := range result.Applied {
-			fmt.Fprintf(stdout, "APPLIED %d\n", applied.Version)
+			_, _ = fmt.Fprintf(stdout, "APPLIED %d\n", applied.Version)
 		}
-		fmt.Fprintf(stdout, "CURRENT %d\n", result.Current)
+		_, _ = fmt.Fprintf(stdout, "CURRENT %d\n", result.Current)
 		return 0
 	case "validate":
 		if err := sqlite.ValidateSchema(operationContext, config); err != nil {
 			return writeCLIResultError(stderr, err)
 		}
-		fmt.Fprintln(stdout, "VALID")
+		_, _ = fmt.Fprintln(stdout, "VALID")
 		return 0
 	case "integrity":
 		// FullIntegrityCheck owns its own bounded maintenance-lock wait. Passing
@@ -87,7 +87,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if err := sqlite.FullIntegrityCheck(ctx, config); err != nil {
 			return writeCLIResultError(stderr, err)
 		}
-		fmt.Fprintln(stdout, "VALID")
+		_, _ = fmt.Fprintln(stdout, "VALID")
 		return 0
 	default:
 		return writeCLIError(stderr, policyengine.ErrorInvalidArgument)
@@ -111,7 +111,7 @@ func writeCLIResultError(stderr io.Writer, err error) int {
 
 func writeCLIError(stderr io.Writer, category policyengine.ErrorCategory) int {
 	if stderr != nil {
-		fmt.Fprintln(stderr, category.String())
+		_, _ = fmt.Fprintln(stderr, category.String())
 	}
 	if category == policyengine.ErrorInvalidArgument {
 		return 2

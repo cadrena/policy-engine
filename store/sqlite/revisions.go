@@ -312,7 +312,7 @@ func (s *Store) ListRevisions(ctx context.Context, request policyengine.ListRevi
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var revisionID string
 			var publishedAtNS int64

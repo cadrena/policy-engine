@@ -28,7 +28,7 @@ func TestLockCoordinatesAcrossProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAdvisoryLock() error = %v", err)
 	}
-	defer secondShared.Close()
+	defer func() { _ = secondShared.Close() }()
 	if err := secondShared.LockShared(context.Background()); err != nil {
 		t.Fatalf("second shared lock error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestLockDeadlineStopsPolling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAdvisoryLock() error = %v", err)
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -105,6 +105,7 @@ func TestLockUnsupportedPlatformFailsClosedWithoutTouchingDatabase(t *testing.T)
 }
 
 func TestLockHelperProcess(t *testing.T) {
+	t.Helper()
 	if os.Getenv(lockHelperFlag) != "1" {
 		return
 	}
@@ -125,11 +126,11 @@ func TestLockHelperProcess(t *testing.T) {
 		}
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stdout, "failed")
+		_, _ = fmt.Fprintln(os.Stdout, "failed")
 		os.Exit(1)
 	}
-	defer lock.Close()
-	fmt.Fprintln(os.Stdout, "locked")
+	defer func() { _ = lock.Close() }()
+	_, _ = fmt.Fprintln(os.Stdout, "locked")
 	_, _ = io.Copy(io.Discard, os.Stdin)
 }
 

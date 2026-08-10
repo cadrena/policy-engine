@@ -280,7 +280,7 @@ func schemaObjectsForTest(t *testing.T, db *sql.DB) map[string]schemaObjectForTe
 	if err != nil {
 		t.Fatalf("query schema objects: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	objects := make(map[string]schemaObjectForTest)
 	for rows.Next() {
 		var object schemaObjectForTest
@@ -311,7 +311,7 @@ func foreignKeysForTest(t *testing.T, db *sql.DB, table string) []string {
 	if err != nil {
 		t.Fatalf("read %s foreign keys: %v", table, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var got []string
 	for rows.Next() {
 		var id, sequence int
@@ -333,7 +333,7 @@ func indexColumnsForTest(t *testing.T, db *sql.DB, index string) []indexColumnFo
 	if err != nil {
 		t.Fatalf("read %s index columns: %v", index, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var got []indexColumnForTest
 	for rows.Next() {
 		var sequence, columnID, descending, key int

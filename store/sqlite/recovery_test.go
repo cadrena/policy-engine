@@ -163,12 +163,12 @@ func TestIntegrityFullCheckReturnsUnavailableForSQLiteBusyAndReleasesStaleRuntim
 		if err != nil {
 			t.Fatalf("database.Conn() error = %v", err)
 		}
-		defer conn.Close()
-		defer database.Close()
+		defer func() { _ = conn.Close() }()
+		defer func() { _ = database.Close() }()
 		if _, err := conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
 			t.Fatalf("BEGIN EXCLUSIVE error = %v", err)
 		}
-		defer conn.ExecContext(context.Background(), "ROLLBACK")
+		defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
 
 		if got := categoryOf(FullIntegrityCheck(context.Background(), config)); got != policyengine.ErrorUnavailable {
 			t.Fatalf("FullIntegrityCheck(busy) category = %v, want %v", got, policyengine.ErrorUnavailable)

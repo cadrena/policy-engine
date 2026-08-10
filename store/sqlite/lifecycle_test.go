@@ -724,7 +724,7 @@ func TestActivationEventAppendFailureRollsBackSlotStateAndSequence(t *testing.T)
 		t.Fatalf("Close() error = %v", err)
 	}
 	db := openRawSQLite(t, config.Path)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var sequence int64
 	if err := db.QueryRowContext(context.Background(), "SELECT sequence FROM state_events WHERE namespace = 'activation-rollback' AND kind = 'slot_activated'").Scan(&sequence); err != nil {
 		t.Fatalf("read committed activation event sequence: %v", err)

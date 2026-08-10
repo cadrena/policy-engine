@@ -186,7 +186,7 @@ func (s *Store) ListActivationHistory(ctx context.Context, request policyengine.
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		var previous int64
 		for rows.Next() {
 			var generation, activatedAtNS int64

@@ -108,7 +108,7 @@ func (d *database) writerLoop(conn *sql.Conn) {
 				completeWrite(request, sqliteError(policyengine.ErrorUnavailable))
 				return
 			}
-			result, discardConnection := d.executeWrite(conn, request)
+			discardConnection, result := d.executeWrite(conn, request)
 			if discardConnection {
 				discardWriterConnection(conn)
 				conn = nil
@@ -132,35 +132,35 @@ func (d *database) awaitWriterConnection() (*sql.Conn, error) {
 	}
 }
 
-func (d *database) executeWrite(conn *sql.Conn, request writeRequest) (error, bool) {
+func (d *database) executeWrite(conn *sql.Conn, request writeRequest) (bool, error) {
 	if err := contextError(request.ctx); err != nil {
-		return err, false
+		return false, err
 	}
 	if d.isClosed() {
-		return sqliteError(policyengine.ErrorUnavailable), false
+		return false, sqliteError(policyengine.ErrorUnavailable)
 	}
 	if _, err := conn.ExecContext(request.ctx, "BEGIN IMMEDIATE"); err != nil {
-		return mapError(request.ctx, err), false
+		return false, mapError(request.ctx, err)
 	}
 
 	callbackErr := request.fn(request.ctx, conn)
 	if callbackErr != nil {
 		if err := rollbackWriter(conn); err != nil {
-			return mapError(request.ctx, callbackErr), true
+			return true, mapError(request.ctx, callbackErr)
 		}
-		return mapError(request.ctx, callbackErr), false
+		return false, mapError(request.ctx, callbackErr)
 	}
 	if err := contextError(request.ctx); err != nil {
 		if rollbackErr := rollbackWriter(conn); rollbackErr != nil {
-			return err, true
+			return true, err
 		}
-		return err, false
+		return false, err
 	}
 	if _, err := conn.ExecContext(request.ctx, "COMMIT"); err != nil {
 		_ = rollbackWriter(conn)
-		return mapError(request.ctx, err), true
+		return true, mapError(request.ctx, err)
 	}
-	return nil, false
+	return false, nil
 }
 
 func discardWriterConnection(conn *sql.Conn) {

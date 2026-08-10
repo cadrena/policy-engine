@@ -282,7 +282,7 @@ func readSchemaObjects(ctx context.Context, conn *sql.Conn) (map[string]schemaOb
 	if err != nil {
 		return nil, schemaValidationError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	objects := make(map[string]schemaObjectSpec, len(schemaV1Objects))
 	for rows.Next() {
 		if len(objects) >= len(schemaV1Objects) {
@@ -315,7 +315,7 @@ func validateTableColumns(ctx context.Context, conn *sql.Conn, table string, exp
 	if err != nil {
 		return schemaValidationError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	count := 0
 	for rows.Next() {
 		if count >= len(expected) {
@@ -541,7 +541,7 @@ func validateTableForeignKeys(ctx context.Context, conn *sql.Conn, table string,
 	if err != nil {
 		return schemaValidationError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	count := 0
 	for rows.Next() {
 		if count >= len(expected) {
@@ -575,7 +575,7 @@ func validateIndex(ctx context.Context, conn *sql.Conn, name string, expected sc
 	if err != nil {
 		return schemaValidationError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	count := 0
 	for rows.Next() {
 		var sequence, columnID, descending, key int
@@ -610,7 +610,7 @@ func validateIndexDefinition(ctx context.Context, conn *sql.Conn, name, table st
 	if err != nil {
 		return schemaValidationError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	found := false
 	for rows.Next() {
 		var sequence, unique, partial int

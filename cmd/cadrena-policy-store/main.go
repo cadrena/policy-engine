@@ -1,3 +1,4 @@
+// cadrena-policy-store provides offline local-store maintenance commands.
 package main
 
 import (

@@ -19,7 +19,7 @@ func TestWriterCommitsAcceptedWritesInOrder(t *testing.T) {
 	// This catches concurrent or LIFO writer execution: two requests accepted
 	// while the first transaction is blocked must commit in acceptance order.
 	database := newWriterDatabase(t)
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
 	firstStarted := make(chan struct{})
@@ -87,7 +87,7 @@ func TestWriterRejectsExpiredRequestBeforeAdmission(t *testing.T) {
 	// This catches a queue that runs a request after its context expires while a
 	// prior transaction holds the one serialized writer lane.
 	database := newWriterDatabase(t)
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
 	started := make(chan struct{})
@@ -131,7 +131,7 @@ func TestWriterUsesBeginImmediateBeforeInvokingCallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openDatabase() error = %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
 	connector, err := moderncsqlite.NewConnector(databaseDSN(config, false))
@@ -139,16 +139,16 @@ func TestWriterUsesBeginImmediateBeforeInvokingCallback(t *testing.T) {
 		t.Fatalf("NewConnector() error = %v", err)
 	}
 	other := sql.OpenDB(connector)
-	defer other.Close()
+	defer func() { _ = other.Close() }()
 	otherConn, err := other.Conn(context.Background())
 	if err != nil {
 		t.Fatalf("other.Conn() error = %v", err)
 	}
-	defer otherConn.Close()
+	defer func() { _ = otherConn.Close() }()
 	if _, err := otherConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
 		t.Fatalf("other BEGIN IMMEDIATE error = %v", err)
 	}
-	defer otherConn.ExecContext(context.Background(), "ROLLBACK")
+	defer func() { _, _ = otherConn.ExecContext(context.Background(), "ROLLBACK") }()
 
 	called := false
 	err = database.write(context.Background(), func(context.Context, *sql.Conn) error {
@@ -177,7 +177,7 @@ func TestWriterRollsBackCallbackFailureAndReusesLane(t *testing.T) {
 	// This catches a callback error path that leaks a transaction or returns the
 	// callback's untrusted error text instead of a sanitized internal failure.
 	database := newWriterDatabase(t)
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
 	callbackFailure := errors.New("callback failure must not escape")
@@ -212,7 +212,7 @@ func TestWriterRollsBackCanceledCallbackAndReusesLane(t *testing.T) {
 	// This catches a callback cancellation that leaves an open transaction or
 	// prevents a following request from succeeding.
 	database := newWriterDatabase(t)
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -246,7 +246,7 @@ func TestWriterReplacesPhysicalConnectionAfterCommitFailure(t *testing.T) {
 	// its pool instead of evicting the physical driver connection.
 	faults := newWriterFaults()
 	database := newFaultWriterDatabase(t, faults)
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
 	faults.failNext("COMMIT", errors.New("commit fault"))
@@ -284,7 +284,7 @@ func TestWriterReplacesPhysicalConnectionAfterRollbackFailure(t *testing.T) {
 	// pooled physical connection, poisoning the next serialized write.
 	faults := newWriterFaults()
 	database := newFaultWriterDatabase(t, faults)
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
 	faults.failNext("ROLLBACK", errors.New("rollback fault"))
@@ -508,7 +508,7 @@ func readWriterLabels(t *testing.T, database *database) []string {
 	if err != nil {
 		t.Fatalf("query labels error = %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var labels []string
 	for rows.Next() {

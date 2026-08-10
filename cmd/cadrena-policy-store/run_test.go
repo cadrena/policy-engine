@@ -80,11 +80,11 @@ func TestRunReportsMigrationLockConflictAsOperationalFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open competing connection: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
 		t.Fatalf("begin competing exclusive transaction: %v", err)
 	}
-	defer conn.ExecContext(context.Background(), "ROLLBACK")
+	defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -152,14 +152,14 @@ func TestRunIntegrityUsesSanitizedExitCategoriesAndExclusiveMaintenance(t *testi
 	// command that can run alongside a runtime or another SQLite maintainer.
 	t.Run("invalid configuration", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "CANARY_POLICY", "CANARY_TUPLE", "policy.db")
-		assertRunIntegrityFailure(t, context.Background(), path, 2, "INVALID_ARGUMENT")
+		assertRunIntegrityFailure(context.Background(), t, path, 2, "INVALID_ARGUMENT")
 	})
 
 	t.Run("canceled", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "policy.db")
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		assertRunIntegrityFailure(t, ctx, path, 1, "CANCELED")
+		assertRunIntegrityFailure(ctx, t, path, 1, "CANCELED")
 	})
 
 	t.Run("ledger corruption", func(t *testing.T) {
@@ -174,7 +174,7 @@ func TestRunIntegrityUsesSanitizedExitCategoriesAndExclusiveMaintenance(t *testi
 		if err := database.Close(); err != nil {
 			t.Fatalf("close corrupt database: %v", err)
 		}
-		assertRunIntegrityFailure(t, context.Background(), path, 1, "INTEGRITY_ERROR")
+		assertRunIntegrityFailure(context.Background(), t, path, 1, "INTEGRITY_ERROR")
 	})
 
 	t.Run("busy SQLite transaction", func(t *testing.T) {
@@ -187,13 +187,13 @@ func TestRunIntegrityUsesSanitizedExitCategoriesAndExclusiveMaintenance(t *testi
 		if err != nil {
 			t.Fatalf("database.Conn() error = %v", err)
 		}
-		defer conn.Close()
-		defer database.Close()
+		defer func() { _ = conn.Close() }()
+		defer func() { _ = database.Close() }()
 		if _, err := conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
 			t.Fatalf("BEGIN EXCLUSIVE error = %v", err)
 		}
-		defer conn.ExecContext(context.Background(), "ROLLBACK")
-		assertRunIntegrityFailure(t, context.Background(), path, 1, "UNAVAILABLE")
+		defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
+		assertRunIntegrityFailure(context.Background(), t, path, 1, "UNAVAILABLE")
 	})
 
 	t.Run("live runtime shared lock", func(t *testing.T) {
@@ -208,12 +208,12 @@ func TestRunIntegrityUsesSanitizedExitCategoriesAndExclusiveMaintenance(t *testi
 		if err != nil {
 			t.Fatalf("sqlite.Open() error = %v", err)
 		}
-		defer runtime.Close()
-		assertRunIntegrityFailure(t, context.Background(), path, 1, "UNAVAILABLE")
+		defer func() { _ = runtime.Close() }()
+		assertRunIntegrityFailure(context.Background(), t, path, 1, "UNAVAILABLE")
 	})
 }
 
-func assertRunIntegrityFailure(t *testing.T, ctx context.Context, path string, wantCode int, wantCategory string) {
+func assertRunIntegrityFailure(ctx context.Context, t *testing.T, path string, wantCode int, wantCategory string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	code := run(ctx, []string{"--db", path, "integrity"}, &stdout, &stderr)

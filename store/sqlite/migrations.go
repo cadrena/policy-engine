@@ -92,7 +92,7 @@ func PlanMigrations(ctx context.Context, config Config) (MigrationPlan, error) {
 	if err != nil {
 		return MigrationPlan{}, err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := lock.LockShared(ctx); err != nil {
 		return MigrationPlan{}, err
 	}
@@ -132,7 +132,7 @@ func applyMigrationsWith(ctx context.Context, config Config, migrations []migrat
 	if err != nil {
 		return MigrationResult{}, err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := lock.LockExclusive(ctx); err != nil {
 		return MigrationResult{}, err
 	}
@@ -243,7 +243,7 @@ func ValidateSchema(ctx context.Context, config Config) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := lock.LockShared(ctx); err != nil {
 		return err
 	}
@@ -432,7 +432,7 @@ func readMigrationLedger(ctx context.Context, conn *sql.Conn, migrations []migra
 	if err != nil {
 		return ledgerState{}, migrationValidationError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	state := ledgerState{exists: true}
 	for rowIndex := 0; rows.Next(); rowIndex++ {
@@ -465,7 +465,7 @@ func validateMigrationLedgerColumns(ctx context.Context, conn *sql.Conn) error {
 	if err != nil {
 		return migrationValidationError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	expected := []struct {
 		name    string

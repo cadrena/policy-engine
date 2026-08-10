@@ -311,7 +311,7 @@ func TestCheckDoesNotTraverseHostileDependencyErrors(t *testing.T) {
 		manufactured := mustEngineError(t, policyengine.ErrorPermissionDenied).(*policyengine.EngineError)
 		hostile := &manufacturingAsError{manufactured: manufactured}
 		service := fixture.newServiceWithStores(t, &errorRevisionStore{RevisionStore: fixture.adapter, err: hostile}, fixture.adapter)
-		_, err, panicValue := checkWithoutPanic(service, request, t)
+		_, panicValue, err := checkWithoutPanic(service, request, t)
 		if panicValue != nil {
 			t.Fatalf("Check panicked: %v", panicValue)
 		}
@@ -324,7 +324,7 @@ func TestCheckDoesNotTraverseHostileDependencyErrors(t *testing.T) {
 	t.Run("Unwrap cannot panic", func(t *testing.T) {
 		hostile := &panickingUnwrapError{}
 		service := fixture.newServiceWithStores(t, &errorRevisionStore{RevisionStore: fixture.adapter, err: hostile}, fixture.adapter)
-		_, err, panicValue := checkWithoutPanic(service, request, t)
+		_, panicValue, err := checkWithoutPanic(service, request, t)
 		if panicValue != nil {
 			t.Fatalf("Check panicked: %v", panicValue)
 		}
@@ -339,7 +339,7 @@ func TestCheckDoesNotTraverseHostileDependencyErrors(t *testing.T) {
 		hostile := &manufacturingAsError{manufactured: manufactured}
 		data := &failingDataReader{DataReader: fixture.adapter, queryErr: hostile}
 		service := fixture.newServiceWithStores(t, fixture.adapter, data)
-		_, err, panicValue := checkWithoutPanic(service, request, t)
+		_, panicValue, err := checkWithoutPanic(service, request, t)
 		if panicValue != nil {
 			t.Fatalf("Check panicked: %v", panicValue)
 		}
@@ -683,11 +683,11 @@ func (e *panickingUnwrapError) Unwrap() error {
 	panic("hostile Unwrap invoked")
 }
 
-func checkWithoutPanic(service *app.AuthorizationService, request policyengine.CheckRequest, t testing.TB) (response policyengine.CheckResponse, err error, panicValue any) {
+func checkWithoutPanic(service *app.AuthorizationService, request policyengine.CheckRequest, t testing.TB) (response policyengine.CheckResponse, panicValue any, err error) {
 	t.Helper()
 	defer func() { panicValue = recover() }()
 	response, err = service.Check(context.Background(), mustCaller(t), request)
-	return response, err, nil
+	return response, nil, err
 }
 
 type failingDataReader struct {

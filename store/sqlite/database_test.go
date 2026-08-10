@@ -22,7 +22,7 @@ func TestConnectionPoolsApplyRequiredPragmasToEveryPhysicalConnection(t *testing
 	if err != nil {
 		t.Fatalf("openDatabase() error = %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	info, err := os.Stat(config.Path)
 	if err != nil {
 		t.Fatalf("Stat(database file) error = %v", err)
@@ -59,7 +59,7 @@ func TestConnectionPoolsApplyRequiredPragmasToEveryPhysicalConnection(t *testing
 		readers = append(readers, reader)
 	}
 	for _, reader := range readers {
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 		assertConnectionPragmas(t, reader, config.BusyTimeout.Milliseconds(), 1)
 	}
 }

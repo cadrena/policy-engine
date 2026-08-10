@@ -47,17 +47,17 @@ func newCursorKeyQueryErrorDatabase(t testing.TB, queryErr error) *database {
 type cursorKeyQueryErrorConnector struct{ queryErr error }
 
 func (c cursorKeyQueryErrorConnector) Connect(context.Context) (driver.Conn, error) {
-	return cursorKeyQueryErrorConn{queryErr: c.queryErr}, nil
+	return cursorKeyQueryErrorConn(c), nil
 }
 
 func (c cursorKeyQueryErrorConnector) Driver() driver.Driver {
-	return cursorKeyQueryErrorDriver{queryErr: c.queryErr}
+	return cursorKeyQueryErrorDriver(c)
 }
 
 type cursorKeyQueryErrorDriver struct{ queryErr error }
 
 func (d cursorKeyQueryErrorDriver) Open(string) (driver.Conn, error) {
-	return cursorKeyQueryErrorConn{queryErr: d.queryErr}, nil
+	return cursorKeyQueryErrorConn(d), nil
 }
 
 type cursorKeyQueryErrorConn struct{ queryErr error }

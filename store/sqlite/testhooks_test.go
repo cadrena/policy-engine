@@ -279,10 +279,8 @@ func (c sqliteLifecycleConn) Close() error {
 func (c sqliteLifecycleConn) QueryContext(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
 	if isSnapshotReadQuery(query) {
 		if c.hooks.consumeSnapshotReadBlock() {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
+			<-ctx.Done()
+			return nil, ctx.Err()
 		}
 		if pause := c.hooks.consumeSnapshotReadPause(); pause != nil {
 			pause.enteredRead()

@@ -37,7 +37,7 @@ func FullIntegrityCheck(ctx context.Context, config Config) (err error) {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := lockIntegrityExclusive(ctx, lock, config.BusyTimeout); err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func validateRuntimeState(ctx context.Context, database *database) error {
 	if err != nil {
 		return integrityResultError(ctx, mapError(ctx, err))
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	migrations, err := loadEmbeddedMigrations()
 	if err != nil {
@@ -192,7 +192,7 @@ func validateRuntimeWALState(ctx context.Context, databasePath string) error {
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 	info, err := wal.Stat()
 	if err != nil {
 		return mapError(ctx, err)
@@ -240,7 +240,7 @@ func validateWALFile(ctx context.Context, databasePath string) error {
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 	info, err := wal.Stat()
 	if err != nil {
 		return mapError(ctx, err)
@@ -299,7 +299,7 @@ func sqliteDatabasePageSize(ctx context.Context, path string) (int, error) {
 	if err != nil {
 		return 0, mapError(ctx, err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	var header [sqliteDatabaseHeaderBytes]byte
 	if _, err := io.ReadFull(database, header[:]); err != nil {
 		return 0, integrityResultError(ctx, mapError(ctx, err))
@@ -413,7 +413,7 @@ func runSQLiteIntegrityCheck(ctx context.Context, conn *sql.Conn) error {
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	count := 0
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
@@ -439,7 +439,7 @@ func runSQLiteForeignKeyCheck(ctx context.Context, conn *sql.Conn) error {
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if rows.Next() {
 		return sqliteError(policyengine.ErrorIntegrity)
 	}
@@ -497,7 +497,7 @@ func validateRuntimeNamespaceHeads(ctx context.Context, conn *sql.Conn) error {
 	if err != nil {
 		return integrityResultError(ctx, mapError(ctx, err))
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
 			return err
@@ -557,7 +557,7 @@ func validateFullNamespaceHeads(ctx context.Context, conn *sql.Conn) (map[string
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	heads := make(map[string]namespaceHead)
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
@@ -593,7 +593,7 @@ func validateFullRevisions(ctx context.Context, conn *sql.Conn, heads map[string
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	revisions := make(map[integrityRevisionKey]struct{})
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
@@ -628,7 +628,7 @@ func validateFullActivationHistory(ctx context.Context, conn *sql.Conn, heads ma
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	history := make(map[integrityHistoryKey]integritySlotRecord)
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
@@ -666,7 +666,7 @@ func validateFullSlotHeads(ctx context.Context, conn *sql.Conn, heads map[string
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	slots := make(map[integritySlotKey]integritySlotRecord)
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
@@ -718,7 +718,7 @@ func validateFullTuples(ctx context.Context, conn *sql.Conn, heads map[string]na
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
 			return err
@@ -758,7 +758,7 @@ func validateFullAttributes(ctx context.Context, conn *sql.Conn, heads map[strin
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	expected := make(map[integrityAttributeAncestorKey]struct{})
 	attributes := make(map[integrityAttributeKey]struct{})
 	for rows.Next() {
@@ -810,7 +810,7 @@ func validateFullAttributes(ctx context.Context, conn *sql.Conn, heads map[strin
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer ancestorRows.Close()
+	defer func() { _ = ancestorRows.Close() }()
 	for ancestorRows.Next() {
 		if err := contextError(ctx); err != nil {
 			return err
@@ -854,7 +854,7 @@ func validateFullEvents(ctx context.Context, conn *sql.Conn, heads map[string]na
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	checker := &Store{cursorKey: key}
 	states := make(map[string]integrityEventState)
 	for rows.Next() {
@@ -931,7 +931,7 @@ func validateFullIdempotency(ctx context.Context, conn *sql.Conn, heads map[stri
 	if err != nil {
 		return mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		if err := contextError(ctx); err != nil {
 			return err

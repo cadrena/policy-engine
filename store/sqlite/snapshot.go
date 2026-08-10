@@ -364,7 +364,7 @@ ORDER BY subject_type, subject_id, subject_relation LIMIT ?`,
 	if err != nil {
 		return store.TupleResult{}, mapError(ctx, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	subjects := make([]dsl.SubjectRef, 0, min(query.Limit(), 16))
 	for rows.Next() {
 		var tupleKey []byte

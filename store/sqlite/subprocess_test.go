@@ -37,8 +37,8 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 	if path == "" || ready == nil || release == nil {
 		t.Fatal("invalid recovery subprocess handshake")
 	}
-	defer ready.Close()
-	defer release.Close()
+	defer func() { _ = ready.Close() }()
+	defer func() { _ = release.Close() }()
 
 	config := validConfig(path)
 	switch os.Getenv(sqliteRecoverySubprocessMode) {

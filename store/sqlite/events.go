@@ -271,7 +271,7 @@ func (s *Store) ListEvents(ctx context.Context, request policyengine.ListEventsR
 		if queryErr != nil {
 			return queryErr
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		var previous int64
 		for rows.Next() {
 			var sequence, createdAtNS int64

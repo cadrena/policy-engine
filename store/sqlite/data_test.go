@@ -38,10 +38,7 @@ func TestOpenRequiresAnExistingMigratedDatabase(t *testing.T) {
 		t.Fatalf("Open(migrated) error = %v", err)
 	}
 	defer func() { _ = opened.Close() }()
-	var complete store.Store = opened
-	if complete == nil {
-		t.Fatal("Open(migrated) returned a nil complete store")
-	}
+	var _ store.Store = opened
 }
 
 func TestOpenValidatesUnmigratedDatabaseBeforeStartingWritableRuntime(t *testing.T) {
@@ -221,7 +218,7 @@ func TestTupleResourceRelationQueryPlanUsesMigrationIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireReaderConnection() error = %v", err)
 	}
-	defer release()
+	defer func() { _ = release() }()
 	rows, err := conn.QueryContext(context.Background(), `EXPLAIN QUERY PLAN SELECT tuple_key, subject_type, subject_id, subject_relation, relation, resource_type, resource_id, expires_at_ns FROM tuples
 WHERE namespace = ? AND resource_type = ? AND resource_id = ? AND relation = ?
 AND (expires_at_ns IS NULL OR expires_at_ns > ?)
@@ -231,7 +228,7 @@ ORDER BY subject_type, subject_id, subject_relation LIMIT ?`,
 	if err != nil {
 		t.Fatalf("EXPLAIN QUERY PLAN error = %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	usedIndex := false
 	for rows.Next() {
 		var id, parent, notUsed int
@@ -271,7 +268,7 @@ func sqliteJournalModeForTest(t testing.TB, path string) string {
 	if err != nil {
 		t.Fatalf("sql.Open(read-only) error = %v", err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	var mode string
 	if err := database.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
 		t.Fatalf("PRAGMA journal_mode error = %v", err)
