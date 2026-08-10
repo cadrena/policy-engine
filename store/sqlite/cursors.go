@@ -76,6 +76,9 @@ func (s *Store) decodeCursor(value string, domain cursorDomain, namespace, slot 
 	if err != nil || len(token) < cursorFixedLength+cursorMACLength {
 		return cursorState{}, sqliteError(policyengine.ErrorInvalidArgument)
 	}
+	if base64.RawURLEncoding.EncodeToString(token) != value {
+		return cursorState{}, sqliteError(policyengine.ErrorInvalidArgument)
+	}
 	body, suppliedMAC := token[:len(token)-cursorMACLength], token[len(token)-cursorMACLength:]
 	mac := hmac.New(sha256.New, s.cursorKey[:])
 	_, _ = mac.Write(body)

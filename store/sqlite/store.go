@@ -71,11 +71,14 @@ func loadCursorKey(ctx context.Context, database *database) ([32]byte, error) {
 
 	var value []byte
 	err = database.readers.QueryRowContext(ctx, "SELECT value FROM cadrena_meta WHERE key = ?", cursorKeyMetaKey).Scan(&value)
-	if errors.Is(err, sql.ErrNoRows) || len(value) != len(result) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return result, sqliteError(policyengine.ErrorIntegrity)
 	}
 	if err != nil {
 		return result, mapError(ctx, err)
+	}
+	if len(value) != len(result) {
+		return result, sqliteError(policyengine.ErrorIntegrity)
 	}
 	copy(result[:], value)
 	if err := contextError(ctx); err != nil {

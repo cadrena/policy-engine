@@ -95,7 +95,7 @@ var schemaV1Tables = map[string]schemaTableSpec{
 			schemaColumnDefault("data_generation", "INTEGER", 1, 0, "0"),
 			schemaColumnDefault("event_sequence", "INTEGER", 1, 0, "0"),
 			schemaColumnDefault("expired_through", "INTEGER", 1, 0, "0"),
-			schemaColumnDefault("effective_time_ns", "INTEGER", 1, 0, "0"),
+			schemaColumn("effective_time_ns", "INTEGER", 0, 0),
 		},
 		checks: []string{
 			"CHECK (DATA_GENERATION >= 0)",

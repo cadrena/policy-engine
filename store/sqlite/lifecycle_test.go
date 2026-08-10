@@ -500,6 +500,112 @@ func TestEventRetentionExpiresCursorsUsingEffectiveClock(t *testing.T) {
 	}
 }
 
+func TestRevisionPreEpochEffectiveClockPreservesEventTimestamp(t *testing.T) {
+	// This catches an uninitialized effective-time sentinel that converts a
+	// valid pre-1970 revision event timestamp to the Unix epoch.
+	occurredAt := time.Unix(-72*60*60, 0).UTC()
+	clock := &sqliteMutableClock{now: occurredAt}
+	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
+	config.Clock = clock
+	adapter := openMigratedStoreForTest(t, config)
+	write := newSQLiteRevisionWrite(t, "pre-epoch-revision", "revision.cdr", []byte("entity user {}"), occurredAt)
+	if _, err := adapter.PutRevision(context.Background(), write); err != nil {
+		t.Fatalf("PutRevision() error = %v", err)
+	}
+	request, err := policyengine.NewListEventsRequest("pre-epoch-revision", "", 10)
+	if err != nil {
+		t.Fatalf("NewListEventsRequest() error = %v", err)
+	}
+	page, err := adapter.ListEvents(context.Background(), request)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if got := page.Events(); len(got) != 1 || !got[0].OccurredAt().Equal(occurredAt) {
+		t.Fatalf("revision event = %#v, want occurred at %v", got, occurredAt)
+	}
+}
+
+func TestActivationPreEpochEffectiveClockPreservesActivationAndEventTimestamp(t *testing.T) {
+	// This catches the same sentinel leaking into durable slot activation time
+	// and its atomically committed event.
+	revisionAt := time.Unix(-72*60*60, 0).UTC()
+	activationAt := revisionAt.Add(time.Hour)
+	clock := &sqliteMutableClock{now: revisionAt}
+	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
+	config.Clock = clock
+	adapter := openMigratedStoreForTest(t, config)
+	write := newSQLiteRevisionWrite(t, "pre-epoch-activation", "activation.cdr", []byte("entity user {}"), revisionAt)
+	if _, err := adapter.PutRevision(context.Background(), write); err != nil {
+		t.Fatalf("PutRevision() error = %v", err)
+	}
+	clock.Set(activationAt)
+	request, err := policyengine.NewActivateRequest("pre-epoch-activation", "primary", write.Metadata().ID(), policyengine.NewUnsetSlotExpectation())
+	if err != nil {
+		t.Fatalf("NewActivateRequest() error = %v", err)
+	}
+	response, err := adapter.Activate(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	if got := response.Activation().ActivatedAt(); !got.Equal(activationAt) {
+		t.Fatalf("activation time = %v, want %v", got, activationAt)
+	}
+	eventsRequest, err := policyengine.NewListEventsRequest("pre-epoch-activation", "", 10)
+	if err != nil {
+		t.Fatalf("NewListEventsRequest() error = %v", err)
+	}
+	events, err := adapter.ListEvents(context.Background(), eventsRequest)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if got := events.Events(); len(got) != 2 || got[1].Kind() != policyengine.StateEventSlotActivated || !got[1].OccurredAt().Equal(activationAt) {
+		t.Fatalf("activation events = %#v, want slot event at %v", got, activationAt)
+	}
+}
+
+func TestEventRetentionExpiresPreEpochEvents(t *testing.T) {
+	// This catches retention using the Unix epoch as the first effective clock,
+	// which prevents valid pre-epoch events from ever becoming old enough.
+	start := time.Unix(-72*60*60, 0).UTC()
+	clock := &sqliteMutableClock{now: start}
+	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
+	config.Clock = clock
+	adapter := openMigratedStoreForTest(t, config)
+	for _, source := range [][]byte{[]byte("entity user {}"), []byte("entity document {}")} {
+		write := newSQLiteRevisionWrite(t, "pre-epoch-retention", "retention.cdr", source, start)
+		if _, err := adapter.PutRevision(context.Background(), write); err != nil {
+			t.Fatalf("PutRevision() error = %v", err)
+		}
+	}
+	firstRequest, err := policyengine.NewListEventsRequest("pre-epoch-retention", "", 1)
+	if err != nil {
+		t.Fatalf("NewListEventsRequest() error = %v", err)
+	}
+	first, err := adapter.ListEvents(context.Background(), firstRequest)
+	if err != nil || first.NextCursor() == "" {
+		t.Fatalf("first ListEvents() = %#v, %v; want a retained cursor", first, err)
+	}
+	clock.Set(start.Add(24 * time.Hour))
+	expiredRequest, err := policyengine.NewListEventsRequest("pre-epoch-retention", first.NextCursor(), 1)
+	if err != nil {
+		t.Fatalf("NewListEventsRequest(expired) error = %v", err)
+	}
+	if _, err := adapter.ListEvents(context.Background(), expiredRequest); categoryOf(err) != policyengine.ErrorCursorExpired {
+		t.Fatalf("expired pre-epoch cursor category = %v, want %v", categoryOf(err), policyengine.ErrorCursorExpired)
+	}
+	resyncRequest, err := policyengine.NewListEventsRequest("pre-epoch-retention", "", 10)
+	if err != nil {
+		t.Fatalf("NewListEventsRequest(resync) error = %v", err)
+	}
+	resync, err := adapter.ListEvents(context.Background(), resyncRequest)
+	if err != nil {
+		t.Fatalf("resync ListEvents() error = %v", err)
+	}
+	if got := resync.Events(); len(got) != 0 {
+		t.Fatalf("expired pre-epoch events = %#v, want none", got)
+	}
+}
+
 func TestRevisionReservationPausePreservesFirstWriterAndWakesWaiter(t *testing.T) {
 	// This catches a same-namespace writer that can overtake a paused first
 	// commit, ignores cancellation while reserved, or fails to release waiters.

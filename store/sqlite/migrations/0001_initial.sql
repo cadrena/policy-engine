@@ -8,7 +8,7 @@ CREATE TABLE namespace_heads (
     data_generation INTEGER NOT NULL DEFAULT 0 CHECK (data_generation >= 0),
     event_sequence INTEGER NOT NULL DEFAULT 0 CHECK (event_sequence >= 0),
     expired_through INTEGER NOT NULL DEFAULT 0 CHECK (expired_through >= 0),
-    effective_time_ns INTEGER NOT NULL DEFAULT 0
+    effective_time_ns INTEGER
 );
 
 CREATE TABLE revisions (

@@ -17,10 +17,11 @@ const (
 )
 
 type namespaceHead struct {
-	dataGeneration  int64
-	eventSequence   int64
-	expiredThrough  int64
-	effectiveTimeNS int64
+	dataGeneration     int64
+	eventSequence      int64
+	expiredThrough     int64
+	effectiveTimeNS    int64
+	effectiveTimeIsSet bool
 }
 
 func (s *Store) ensureNamespaceHead(ctx context.Context, conn *sql.Conn, namespace string) (namespaceHead, error) {
@@ -34,8 +35,9 @@ func readNamespaceHead(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, namespace string) (namespaceHead, error) {
 	var result namespaceHead
+	var effectiveTimeNS sql.NullInt64
 	err := queryer.QueryRowContext(ctx, "SELECT data_generation, event_sequence, expired_through, effective_time_ns FROM namespace_heads WHERE namespace = ?", namespace).Scan(
-		&result.dataGeneration, &result.eventSequence, &result.expiredThrough, &result.effectiveTimeNS,
+		&result.dataGeneration, &result.eventSequence, &result.expiredThrough, &effectiveTimeNS,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return namespaceHead{}, sql.ErrNoRows
@@ -45,6 +47,10 @@ func readNamespaceHead(ctx context.Context, queryer interface {
 	}
 	if result.dataGeneration < 0 || result.eventSequence < 0 || result.expiredThrough < 0 || result.expiredThrough > result.eventSequence {
 		return namespaceHead{}, sqliteError(policyengine.ErrorIntegrity)
+	}
+	if effectiveTimeNS.Valid {
+		result.effectiveTimeNS = effectiveTimeNS.Int64
+		result.effectiveTimeIsSet = true
 	}
 	return result, nil
 }
@@ -59,11 +65,13 @@ func (s *Store) effectiveNow(ctx context.Context, conn *sql.Conn, namespace stri
 		return time.Time{}, err
 	}
 	effectiveNS := candidateNS
-	if effectiveNS < head.effectiveTimeNS {
+	if head.effectiveTimeIsSet && effectiveNS < head.effectiveTimeNS {
 		effectiveNS = head.effectiveTimeNS
 	}
-	if _, err := conn.ExecContext(ctx, "UPDATE namespace_heads SET effective_time_ns = ? WHERE namespace = ?", effectiveNS, namespace); err != nil {
-		return time.Time{}, mapError(ctx, err)
+	if !head.effectiveTimeIsSet || effectiveNS != head.effectiveTimeNS {
+		if _, err := conn.ExecContext(ctx, "UPDATE namespace_heads SET effective_time_ns = ? WHERE namespace = ?", effectiveNS, namespace); err != nil {
+			return time.Time{}, mapError(ctx, err)
+		}
 	}
 	if effectiveNS == candidateNS {
 		return candidate, nil
@@ -221,10 +229,10 @@ func (s *Store) pruneEventsForRead(ctx context.Context, namespace string) error 
 			return err
 		}
 		effectiveNS := candidateNS
-		if effectiveNS < head.effectiveTimeNS {
+		if head.effectiveTimeIsSet && effectiveNS < head.effectiveTimeNS {
 			effectiveNS = head.effectiveTimeNS
 		}
-		if effectiveNS != head.effectiveTimeNS {
+		if !head.effectiveTimeIsSet || effectiveNS != head.effectiveTimeNS {
 			if _, err := conn.ExecContext(ctx, "UPDATE namespace_heads SET effective_time_ns = ? WHERE namespace = ?", effectiveNS, namespace); err != nil {
 				return mapError(ctx, err)
 			}

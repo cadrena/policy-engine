@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"testing"
 	"time"
@@ -203,5 +204,37 @@ func TestCursorCodecBindsScopeSequenceAndExpiryBoundary(t *testing.T) {
 	tampered := tamperSQLiteCursorForTest(first)
 	if _, err := adapter.decodeCursor(tampered, cursorDomainEvent, "cursor-ns", ""); categoryOf(err) != policyengine.ErrorInvalidArgument {
 		t.Fatalf("tampered cursor category = %v, want %v", categoryOf(err), policyengine.ErrorInvalidArgument)
+	}
+}
+
+func TestCursorCodecRejectsNonCanonicalTrailingBitAlias(t *testing.T) {
+	// This catches an opaque cursor parser that lets Raw Base64 spellings with
+	// nonzero unused tail bits authenticate as the same durable token.
+	adapter := &Store{}
+	for index := range adapter.cursorKey {
+		adapter.cursorKey[index] = byte(index + 1)
+	}
+	canonical, err := adapter.newCursor(cursorState{domain: cursorDomainEvent, namespace: "cursor-alias", position: 9, boundary: 4})
+	if err != nil {
+		t.Fatalf("newCursor() error = %v", err)
+	}
+	decodedCanonical, err := base64.RawURLEncoding.DecodeString(canonical)
+	if err != nil {
+		t.Fatalf("DecodeString(canonical) error = %v", err)
+	}
+	alias := ""
+	for _, digit := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" {
+		candidate := canonical[:len(canonical)-1] + string(digit)
+		decodedCandidate, decodeErr := base64.RawURLEncoding.DecodeString(candidate)
+		if candidate != canonical && decodeErr == nil && bytes.Equal(decodedCandidate, decodedCanonical) {
+			alias = candidate
+			break
+		}
+	}
+	if alias == "" {
+		t.Fatal("test did not construct a non-canonical Raw Base64 alias")
+	}
+	if _, err := adapter.decodeCursor(alias, cursorDomainEvent, "cursor-alias", ""); categoryOf(err) != policyengine.ErrorInvalidArgument {
+		t.Fatalf("non-canonical cursor alias category = %v, want %v", categoryOf(err), policyengine.ErrorInvalidArgument)
 	}
 }
