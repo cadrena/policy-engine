@@ -230,10 +230,6 @@ func ValidateSchema(ctx context.Context, config Config) error {
 	if err := validateMigrationRequest(ctx, config); err != nil {
 		return err
 	}
-	migrations, err := loadEmbeddedMigrations()
-	if err != nil {
-		return err
-	}
 
 	exists, err := sqliteDatabaseExists(config.Path)
 	if err != nil {
@@ -250,6 +246,28 @@ func ValidateSchema(ctx context.Context, config Config) error {
 	defer lock.Close()
 	if err := lock.LockShared(ctx); err != nil {
 		return err
+	}
+	return validateSchemaUnderSharedLock(ctx, config)
+}
+
+// validateSchemaUnderSharedLock validates an existing durable database through
+// a read-only connection. Its caller owns the compatible shared advisory lock
+// for the entire validation interval.
+func validateSchemaUnderSharedLock(ctx context.Context, config Config) error {
+	if err := validateMigrationRequest(ctx, config); err != nil {
+		return err
+	}
+	migrations, err := loadEmbeddedMigrations()
+	if err != nil {
+		return err
+	}
+
+	exists, err := sqliteDatabaseExists(config.Path)
+	if err != nil {
+		return mapError(ctx, err)
+	}
+	if !exists {
+		return sqliteError(policyengine.ErrorFailedPrecondition)
 	}
 
 	database, conn, err := openMigrationConnection(ctx, config, true)
@@ -358,7 +376,9 @@ func sqliteDatabaseExists(path string) (bool, error) {
 func openMigrationConnection(ctx context.Context, config Config, reader bool) (*sql.DB, *sql.Conn, error) {
 	dsn := databaseDSN(config, reader)
 	if reader {
-		dsn += "&mode=ro"
+		// Schema validation must never promote journal mode, create a file, or
+		// initialize a writable runtime pool before the durable schema passes.
+		dsn = databaseDSNMode(config, true, false)
 	}
 	connector, err := moderncsqlite.NewConnector(dsn)
 	if err != nil {

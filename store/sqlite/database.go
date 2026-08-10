@@ -48,10 +48,30 @@ func openExistingDatabase(ctx context.Context, config Config) (*database, error)
 	return openDatabaseWithConnectorFactoryMode(ctx, config, moderncsqlite.NewConnector, false)
 }
 
+// openExistingDatabaseWithLock transfers an already-held runtime shared lock
+// into the writer/reader pool lifetime. It is used by public Open only after
+// read-only schema validation has completed under that same lock.
+func openExistingDatabaseWithLock(ctx context.Context, config Config, lock advisoryLock) (*database, error) {
+	return openDatabaseWithConnectorFactoryModeAndLock(ctx, config, moderncsqlite.NewConnector, false, lock)
+}
+
 func openDatabaseWithConnectorFactoryMode(ctx context.Context, config Config, newConnector connectorFactory, create bool) (_ *database, err error) {
-	if newConnector == nil {
-		return nil, sqliteError(policyengine.ErrorInvalidArgument)
+	lock, err := acquireRuntimeSharedLock(ctx, config, create)
+	if err != nil {
+		return nil, err
 	}
+	database, err := openDatabaseWithConnectorFactoryModeAndLock(ctx, config, newConnector, create, lock)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return database, nil
+}
+
+// acquireRuntimeSharedLock owns the existing-only checks that must happen
+// before any lock sidecar or SQLite runtime connection is created. Its caller
+// transfers the held lock to a database lifetime or closes it on failure.
+func acquireRuntimeSharedLock(ctx context.Context, config Config, create bool) (advisoryLock, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
@@ -76,6 +96,34 @@ func openDatabaseWithConnectorFactoryMode(ctx context.Context, config Config, ne
 	}
 	if err := lock.LockShared(ctx); err != nil {
 		_ = lock.Close()
+		return nil, err
+	}
+	if !create {
+		exists, statErr := sqliteDatabaseExists(config.Path)
+		if statErr != nil {
+			_ = lock.Close()
+			return nil, mapError(ctx, statErr)
+		}
+		if !exists {
+			_ = lock.Close()
+			return nil, sqliteError(policyengine.ErrorFailedPrecondition)
+		}
+	}
+	return lock, nil
+}
+
+// openDatabaseWithConnectorFactoryModeAndLock creates runtime pools only after
+// its caller has acquired the shared lock. Public Open uses this after a
+// read-only schema validation; direct task-foundation openers retain their
+// existing create/verify behavior.
+func openDatabaseWithConnectorFactoryModeAndLock(ctx context.Context, config Config, newConnector connectorFactory, create bool, lock advisoryLock) (_ *database, err error) {
+	if newConnector == nil || lock == nil {
+		return nil, sqliteError(policyengine.ErrorInvalidArgument)
+	}
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	if err := config.validate(); err != nil {
 		return nil, err
 	}
 

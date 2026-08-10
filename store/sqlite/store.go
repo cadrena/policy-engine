@@ -21,6 +21,13 @@ type Store struct {
 	closeErr                   error
 	revisions                  revisionReservationSet
 	generations                generationWaitSet
+
+	snapshotMu          sync.Mutex
+	snapshotClosing     bool
+	snapshotShutdown    chan struct{}
+	snapshotOpeners     int
+	snapshotOpenersDone chan struct{}
+	snapshots           map[*snapshot]struct{}
 }
 
 var _ store.Store = (*Store)(nil)
@@ -29,15 +36,21 @@ var _ store.Store = (*Store)(nil)
 // creates a database, applies migrations, or repairs durable state.
 func Open(config Config) (*Store, error) {
 	ctx := context.Background()
-	database, err := openExistingDatabase(ctx, config)
+	lock, err := acquireRuntimeSharedLock(ctx, config, false)
 	if err != nil {
 		return nil, err
 	}
-	// Retain the runtime shared lock while validating. That prevents an
-	// exclusive migration from changing the durable schema between validation
-	// and the lifetime that will serve public requests.
-	if err := ValidateSchema(ctx, config); err != nil {
-		_ = database.Close()
+	// The retained runtime shared lock prevents an exclusive migration from
+	// changing the durable schema between this read-only validation and the
+	// eventual pool lifetime. No writable connector exists until it passes.
+	if err := validateSchemaUnderSharedLock(ctx, config); err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	database, err := openExistingDatabaseWithLock(ctx, config, lock)
+	if err != nil {
+		// The database constructor owns and closes the transferred lock on every
+		// partial-pool failure path.
 		return nil, err
 	}
 	result, err := newStoreFromDatabase(ctx, database)
@@ -73,6 +86,7 @@ func newStoreFromDatabase(ctx context.Context, database *database) (*Store, erro
 		db:                         database,
 		activationHistoryRetention: database.config.ActivationHistoryRetention,
 		cursorKey:                  key,
+		snapshotShutdown:           make(chan struct{}),
 	}, nil
 }
 
@@ -111,9 +125,107 @@ func (s *Store) Close() error {
 		return sqliteError(policyengine.ErrorFailedPrecondition)
 	}
 	s.closeOnce.Do(func() {
-		s.closeErr = s.db.Close()
+		snapshotErr := s.closeOwnedSnapshots()
+		databaseErr := s.db.Close()
+		if snapshotErr != nil {
+			s.closeErr = snapshotErr
+			return
+		}
+		s.closeErr = databaseErr
 	})
 	return s.closeErr
+}
+
+// beginSnapshotOpen admits one in-flight OpenSnapshot operation. Store.Close
+// closes snapshotShutdown before draining existing views, so waiters and
+// racing openers can leave without allowing a new pinned connection to escape
+// the instance lifetime.
+func (s *Store) beginSnapshotOpen() bool {
+	if s == nil {
+		return false
+	}
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	if s.snapshotClosing {
+		return false
+	}
+	s.snapshotOpeners++
+	if s.snapshotOpeners == 1 {
+		s.snapshotOpenersDone = make(chan struct{})
+	}
+	return true
+}
+
+func (s *Store) endSnapshotOpen() {
+	if s == nil {
+		return
+	}
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	if s.snapshotOpeners == 0 {
+		return
+	}
+	s.snapshotOpeners--
+	if s.snapshotOpeners == 0 && s.snapshotOpenersDone != nil {
+		close(s.snapshotOpenersDone)
+	}
+}
+
+func (s *Store) registerSnapshot(view *snapshot) bool {
+	if s == nil || view == nil {
+		return false
+	}
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	if s.snapshotClosing {
+		return false
+	}
+	if s.snapshots == nil {
+		s.snapshots = make(map[*snapshot]struct{})
+	}
+	view.owner = s
+	s.snapshots[view] = struct{}{}
+	return true
+}
+
+func (s *Store) unregisterSnapshot(view *snapshot) {
+	if s == nil || view == nil {
+		return
+	}
+	s.snapshotMu.Lock()
+	delete(s.snapshots, view)
+	s.snapshotMu.Unlock()
+}
+
+func (s *Store) closeOwnedSnapshots() error {
+	if s == nil {
+		return nil
+	}
+	s.snapshotMu.Lock()
+	if !s.snapshotClosing {
+		s.snapshotClosing = true
+		if s.snapshotShutdown != nil {
+			close(s.snapshotShutdown)
+		}
+	}
+	views := make([]*snapshot, 0, len(s.snapshots))
+	for view := range s.snapshots {
+		views = append(views, view)
+	}
+	done := s.snapshotOpenersDone
+	opening := s.snapshotOpeners
+	s.snapshotMu.Unlock()
+
+	var first error
+	for _, view := range views {
+		if err := view.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	if opening > 0 && done != nil {
+		<-done
+	}
+	return first
 }
 
 func (s *Store) read(ctx context.Context, fn func(*sql.DB) error) error {

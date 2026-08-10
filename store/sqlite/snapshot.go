@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -78,6 +79,10 @@ func (s *Store) OpenSnapshot(ctx context.Context, request store.SnapshotRequest)
 	if s == nil || s.db == nil {
 		return nil, sqliteError(policyengine.ErrorFailedPrecondition)
 	}
+	if !s.beginSnapshotOpen() {
+		return nil, sqliteError(policyengine.ErrorUnavailable)
+	}
+	defer s.endSnapshotOpen()
 	readAt, readAtNS, ok := sqliteTimestamp(request.ReadAt())
 	if !ok {
 		return nil, sqliteError(policyengine.ErrorInvalidArgument)
@@ -92,13 +97,28 @@ func (s *Store) OpenSnapshot(ctx context.Context, request store.SnapshotRequest)
 			return nil, err
 		}
 		if view.generation >= request.MinimumGeneration() {
+			if !s.registerSnapshot(view) {
+				closeErr := view.closePinned()
+				if contextErr := contextError(ctx); contextErr != nil {
+					return nil, contextErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				return nil, sqliteError(policyengine.ErrorUnavailable)
+			}
 			if err := contextError(ctx); err != nil {
 				_ = view.Close()
 				return nil, err
 			}
 			return view, nil
 		}
-		view.closePinned()
+		if err := view.closePinned(); err != nil {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, contextErr
+			}
+			return nil, err
+		}
 
 		// Register before a second observation. A commit that races either
 		// observation is then visible through the fresh pinned head or closes
@@ -115,23 +135,45 @@ func (s *Store) OpenSnapshot(ctx context.Context, request store.SnapshotRequest)
 		}
 		if view.generation >= request.MinimumGeneration() {
 			s.generations.unregister(request.Namespace(), waiter)
+			if !s.registerSnapshot(view) {
+				closeErr := view.closePinned()
+				if contextErr := contextError(ctx); contextErr != nil {
+					return nil, contextErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				return nil, sqliteError(policyengine.ErrorUnavailable)
+			}
 			if err := contextError(ctx); err != nil {
 				_ = view.Close()
 				return nil, err
 			}
 			return view, nil
 		}
-		view.closePinned()
+		if err := view.closePinned(); err != nil {
+			s.generations.unregister(request.Namespace(), waiter)
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, contextErr
+			}
+			return nil, err
+		}
 
 		select {
 		case <-waiter.changed:
 		case <-s.db.closed:
+		case <-s.snapshotShutdown:
 		case <-ctx.Done():
 		}
 		s.generations.unregister(request.Namespace(), waiter)
 		// A usable context always wins when it races shutdown or notification.
 		if err := contextError(ctx); err != nil {
 			return nil, err
+		}
+		select {
+		case <-s.snapshotShutdown:
+			return nil, sqliteError(policyengine.ErrorUnavailable)
+		default:
 		}
 		if s.db.isClosed() {
 			return nil, sqliteError(policyengine.ErrorUnavailable)
@@ -147,8 +189,8 @@ func (s *Store) openPinnedSnapshot(ctx context.Context, request store.SnapshotRe
 	cleanup := true
 	defer func() {
 		if cleanup {
-			rollbackSnapshotConnection(conn)
-			release()
+			_ = rollbackSnapshotConnection(conn)
+			_ = release()
 		}
 	}()
 	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
@@ -183,7 +225,8 @@ type snapshot struct {
 	readAtNS   int64
 
 	conn              *sql.Conn
-	releaseConnection func()
+	releaseConnection func() error
+	owner             *Store
 }
 
 var _ store.Snapshot = (*snapshot)(nil)
@@ -211,7 +254,7 @@ func (s *snapshot) release() {
 		return
 	}
 	var conn *sql.Conn
-	var release func()
+	var release func() error
 	s.lifecycle.Lock()
 	s.active--
 	if s.closing && s.active == 0 {
@@ -219,46 +262,62 @@ func (s *snapshot) release() {
 	}
 	s.lifecycle.Unlock()
 	if conn != nil || release != nil {
-		s.finishClose(conn, release)
+		_ = s.finishClose(conn, release)
 	}
 }
 
-func (s *snapshot) detachLocked() (*sql.Conn, func()) {
+func (s *snapshot) detachLocked() (*sql.Conn, func() error) {
 	conn, release := s.conn, s.releaseConnection
 	s.conn = nil
 	s.releaseConnection = nil
 	return conn, release
 }
 
-func (s *snapshot) closePinned() {
+func (s *snapshot) closePinned() error {
 	if s == nil {
-		return
+		return sqliteError(policyengine.ErrorFailedPrecondition)
 	}
-	s.lifecycle.Lock()
-	conn, release := s.detachLocked()
-	s.closing = true
-	s.lifecycle.Unlock()
-	s.finishClose(conn, release)
+	return s.Close()
 }
 
-func (s *snapshot) finishClose(conn *sql.Conn, release func()) {
-	rollbackSnapshotConnection(conn)
+func (s *snapshot) finishClose(conn *sql.Conn, release func() error) error {
+	closeErr := rollbackSnapshotConnection(conn)
 	if release != nil {
-		release()
+		if releaseErr := release(); closeErr == nil && releaseErr != nil {
+			closeErr = mapError(context.Background(), releaseErr)
+		}
 	}
+	var owner *Store
 	s.lifecycle.Lock()
+	if s.closeErr == nil && closeErr != nil {
+		s.closeErr = closeErr
+	}
+	closeErr = s.closeErr
 	select {
 	case <-s.closeDone:
 	default:
 		close(s.closeDone)
 	}
+	owner = s.owner
 	s.lifecycle.Unlock()
+	if owner != nil {
+		owner.unregisterSnapshot(s)
+	}
+	return closeErr
 }
 
-func rollbackSnapshotConnection(conn *sql.Conn) {
-	if conn != nil {
-		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+func rollbackSnapshotConnection(conn *sql.Conn) error {
+	if conn == nil {
+		return nil
 	}
+	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		// If a rollback cannot be confirmed, the transaction state is unsafe to
+		// reuse. Raw(driver.ErrBadConn) makes database/sql discard the physical
+		// connection before the reader permit becomes available again.
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return mapError(context.Background(), err)
+	}
+	return nil
 }
 
 func (s *snapshot) queryConnection(ctx context.Context) (*sql.Conn, func(), error) {
@@ -444,7 +503,7 @@ func (s *snapshot) Close() error {
 		return sqliteError(policyengine.ErrorFailedPrecondition)
 	}
 	var conn *sql.Conn
-	var release func()
+	var release func() error
 	s.lifecycle.Lock()
 	if !s.closing {
 		s.closing = true
@@ -455,7 +514,7 @@ func (s *snapshot) Close() error {
 	done := s.closeDone
 	s.lifecycle.Unlock()
 	if conn != nil || release != nil {
-		s.finishClose(conn, release)
+		_ = s.finishClose(conn, release)
 	}
 	<-done
 	s.lifecycle.Lock()

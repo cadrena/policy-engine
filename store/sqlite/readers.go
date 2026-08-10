@@ -43,7 +43,7 @@ func (d *database) acquireReader(ctx context.Context) (func(), error) {
 // acquireReaderConnection holds one bounded reader admission and returns one
 // physical connection. Callers that need a pinned SQLite snapshot must retain
 // the connection until their transaction closes.
-func (d *database) acquireReaderConnection(ctx context.Context) (*sql.Conn, func(), error) {
+func (d *database) acquireReaderConnection(ctx context.Context) (*sql.Conn, func() error, error) {
 	releaseAdmission, err := d.acquireReader(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -58,11 +58,13 @@ func (d *database) acquireReaderConnection(ctx context.Context) (*sql.Conn, func
 		return nil, nil, mapError(ctx, err)
 	}
 	var releaseOnce sync.Once
-	release := func() {
+	var releaseErr error
+	release := func() error {
 		releaseOnce.Do(func() {
-			_ = conn.Close()
+			releaseErr = conn.Close()
 			releaseAdmission()
 		})
+		return releaseErr
 	}
 	return conn, release, nil
 }

@@ -22,9 +22,12 @@ type sqliteLifecycleTestHooks struct {
 	failNextTupleMutation     bool
 	failNextAttributeMutation bool
 	failNextCommit            bool
+	failNextRollback          bool
 	blockNextSnapshotRead     bool
 	nextSnapshotReadPause     *sqliteSnapshotReadPause
 	activeSnapshotReadPause   *sqliteSnapshotReadPause
+	readerConnections         int
+	readerConnectionCloses    int
 }
 
 func (h *sqliteLifecycleTestHooks) armNextEventAppendFailure() {
@@ -94,6 +97,52 @@ func (h *sqliteLifecycleTestHooks) consumeCommitFailure() bool {
 	return true
 }
 
+func (h *sqliteLifecycleTestHooks) armNextSnapshotRollbackFailure() {
+	h.mu.Lock()
+	h.failNextRollback = true
+	h.mu.Unlock()
+}
+
+func (h *sqliteLifecycleTestHooks) consumeSnapshotRollbackFailure() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.failNextRollback {
+		return false
+	}
+	h.failNextRollback = false
+	return true
+}
+
+func (h *sqliteLifecycleTestHooks) readerConnectionCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.readerConnections
+}
+
+func (h *sqliteLifecycleTestHooks) readerConnectionCloseCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.readerConnectionCloses
+}
+
+func (h *sqliteLifecycleTestHooks) openedConnection(reader bool) {
+	if !reader {
+		return
+	}
+	h.mu.Lock()
+	h.readerConnections++
+	h.mu.Unlock()
+}
+
+func (h *sqliteLifecycleTestHooks) closedConnection(reader bool) {
+	if !reader {
+		return
+	}
+	h.mu.Lock()
+	h.readerConnectionCloses++
+	h.mu.Unlock()
+}
+
 func (h *sqliteLifecycleTestHooks) armNextSnapshotReadBlock() {
 	h.mu.Lock()
 	h.blockNextSnapshotRead = true
@@ -149,6 +198,7 @@ func (h *sqliteLifecycleTestHooks) reset() {
 	h.failNextTupleMutation = false
 	h.failNextAttributeMutation = false
 	h.failNextCommit = false
+	h.failNextRollback = false
 	h.blockNextSnapshotRead = false
 	h.nextSnapshotReadPause = nil
 	h.activeSnapshotReadPause = nil
@@ -178,7 +228,8 @@ func (p *sqliteSnapshotReadPause) Release() {
 
 type sqliteLifecycleConnector struct {
 	driver.Connector
-	hooks *sqliteLifecycleTestHooks
+	hooks  *sqliteLifecycleTestHooks
+	reader bool
 }
 
 func (c sqliteLifecycleConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -186,12 +237,14 @@ func (c sqliteLifecycleConnector) Connect(ctx context.Context) (driver.Conn, err
 	if err != nil {
 		return nil, err
 	}
-	return sqliteLifecycleConn{Conn: conn, hooks: c.hooks}, nil
+	c.hooks.openedConnection(c.reader)
+	return sqliteLifecycleConn{Conn: conn, hooks: c.hooks, reader: c.reader}, nil
 }
 
 type sqliteLifecycleConn struct {
 	driver.Conn
-	hooks *sqliteLifecycleTestHooks
+	hooks  *sqliteLifecycleTestHooks
+	reader bool
 }
 
 func (c sqliteLifecycleConn) ExecContext(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Result, error) {
@@ -199,6 +252,9 @@ func (c sqliteLifecycleConn) ExecContext(ctx context.Context, query string, argu
 		return nil, sqliteError(policyengine.ErrorUnavailable)
 	}
 	if isCommit(query) && c.hooks.consumeCommitFailure() {
+		return nil, sqliteError(policyengine.ErrorUnavailable)
+	}
+	if isRollback(query) && c.hooks.consumeSnapshotRollbackFailure() {
 		return nil, sqliteError(policyengine.ErrorUnavailable)
 	}
 	if execer, ok := c.Conn.(driver.ExecerContext); ok {
@@ -213,6 +269,11 @@ func (c sqliteLifecycleConn) ExecContext(ctx context.Context, query string, argu
 		return result, nil
 	}
 	return nil, driver.ErrSkip
+}
+
+func (c sqliteLifecycleConn) Close() error {
+	c.hooks.closedConnection(c.reader)
+	return c.Conn.Close()
 }
 
 func (c sqliteLifecycleConn) QueryContext(ctx context.Context, query string, arguments []driver.NamedValue) (driver.Rows, error) {
@@ -256,6 +317,10 @@ func isCommit(query string) bool {
 	return strings.EqualFold(strings.TrimSpace(query), "COMMIT")
 }
 
+func isRollback(query string) bool {
+	return strings.EqualFold(strings.TrimSpace(query), "ROLLBACK")
+}
+
 func isSnapshotReadQuery(query string) bool {
 	normalized := strings.ToUpper(strings.TrimSpace(query))
 	return strings.HasPrefix(normalized, "SELECT TUPLE_KEY, SUBJECT_TYPE, SUBJECT_ID, SUBJECT_RELATION, RELATION, RESOURCE_TYPE, RESOURCE_ID, EXPIRES_AT_NS FROM TUPLES") ||
@@ -269,7 +334,7 @@ func lifecycleTestConnectorFactory(hooks *sqliteLifecycleTestHooks) connectorFac
 		if err != nil {
 			return base, err
 		}
-		return sqliteLifecycleConnector{Connector: base, hooks: hooks}, nil
+		return sqliteLifecycleConnector{Connector: base, hooks: hooks, reader: strings.Contains(dsn, "_query_only=1")}, nil
 	}
 }
 

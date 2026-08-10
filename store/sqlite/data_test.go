@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +42,188 @@ func TestOpenRequiresAnExistingMigratedDatabase(t *testing.T) {
 	if complete == nil {
 		t.Fatal("Open(migrated) returned a nil complete store")
 	}
+}
+
+func TestOpenValidatesUnmigratedDatabaseBeforeStartingWritableRuntime(t *testing.T) {
+	// This catches Open() starting a writer with journal_mode=WAL before it has
+	// proved the existing database is migrated. Such a rejected open must leave
+	// the file, SQLite sidecars, and journal mode unchanged and release its
+	// temporary runtime lock.
+	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
+	bootstrap, err := sql.Open("sqlite", "file:"+config.Path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := bootstrap.Exec("CREATE TABLE unmigrated_marker(value TEXT NOT NULL)"); err != nil {
+		_ = bootstrap.Close()
+		t.Fatalf("CREATE TABLE error = %v", err)
+	}
+	var initialJournal string
+	if err := bootstrap.QueryRow("PRAGMA journal_mode=DELETE").Scan(&initialJournal); err != nil {
+		_ = bootstrap.Close()
+		t.Fatalf("PRAGMA journal_mode=DELETE error = %v", err)
+	}
+	if err := bootstrap.Close(); err != nil {
+		t.Fatalf("bootstrap Close() error = %v", err)
+	}
+	if initialJournal != "delete" {
+		t.Fatalf("initial journal mode = %q, want delete", initialJournal)
+	}
+
+	beforeBytes, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatalf("ReadFile(before) error = %v", err)
+	}
+	beforeArtifacts := sqliteDatabaseArtifactsForTest(t, config.Path)
+	if beforeMode := sqliteJournalModeForTest(t, config.Path); beforeMode != "delete" {
+		t.Fatalf("journal mode before Open = %q, want delete", beforeMode)
+	}
+
+	opened, err := Open(config)
+	if opened != nil {
+		_ = opened.Close()
+		t.Fatalf("Open(unmigrated) returned a store with error %v", err)
+	}
+	if categoryOf(err) != policyengine.ErrorFailedPrecondition {
+		t.Fatalf("Open(unmigrated) category = %v, want FAILED_PRECONDITION", categoryOf(err))
+	}
+
+	afterBytes, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatalf("ReadFile(after) error = %v", err)
+	}
+	if !bytes.Equal(afterBytes, beforeBytes) {
+		t.Fatal("Open(unmigrated) changed database bytes before rejecting it")
+	}
+	if afterArtifacts := sqliteDatabaseArtifactsForTest(t, config.Path); !reflect.DeepEqual(afterArtifacts, beforeArtifacts) {
+		t.Fatalf("Open(unmigrated) SQLite artifacts = %q, want %q", afterArtifacts, beforeArtifacts)
+	}
+	if afterMode := sqliteJournalModeForTest(t, config.Path); afterMode != "delete" {
+		t.Fatalf("journal mode after Open = %q, want delete", afterMode)
+	}
+
+	lock, err := newAdvisoryLock(config.Path)
+	if err != nil {
+		t.Fatalf("newAdvisoryLock() error = %v", err)
+	}
+	defer func() { _ = lock.Close() }()
+	lockContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := lock.LockExclusive(lockContext); err != nil {
+		t.Fatalf("exclusive lock after rejected Open() error = %v", err)
+	}
+}
+
+func TestDataCodecsRejectInvalidTagsCountsAndOversizedLengthHeaders(t *testing.T) {
+	// This catches a decoder that trusts a tag/count/declared length before
+	// validation, allocates a claimed payload, or lets malformed durable bytes
+	// reach a public constructor.
+	for _, test := range []struct {
+		name   string
+		decode func() error
+	}{
+		{name: "tuple version", decode: func() error { _, err := decodeTupleKey([]byte{codecVersion + 1}); return err }},
+		{name: "attribute value tag", decode: func() error { _, err := decodeAttributeValue([]byte{codecVersion, 0xff}); return err }},
+		{name: "attribute boolean payload", decode: func() error {
+			_, err := decodeAttributeValue([]byte{codecVersion, attributeValueBoolean, 2})
+			return err
+		}},
+		{name: "attribute string oversized header", decode: func() error {
+			_, err := decodeAttributeValue([]byte{codecVersion, attributeValueString, 0x00, 0x01, 0x00, 0x01})
+			return err
+		}},
+		{name: "attribute path zero count", decode: func() error { _, err := decodeAttributePath([]byte{codecVersion, 0, 0, 0, 0}); return err }},
+		{name: "attribute path oversized count", decode: func() error { _, err := decodeAttributePath([]byte{codecVersion, 0x00, 0x01, 0x86, 0xa1}); return err }},
+		{name: "attribute key oversized nested payload", decode: func() error {
+			_, err := decodeAttributeKey([]byte{codecVersion, 0, 1, 'e', 0, 1, 'i', 0x00, 0x40, 0x00, 0x01})
+			return err
+		}},
+		{name: "idempotency response tag", decode: func() error { _, err := decodeIdempotencyResponse([]byte{codecVersion, 0}, false); return err }},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			err := test.decode()
+			if categoryOf(err) != policyengine.ErrorIntegrity {
+				t.Fatalf("decoder category = %v, want INTEGRITY", categoryOf(err))
+			}
+		})
+	}
+}
+
+func TestTupleResourceRelationQueryPlanUsesMigrationIndex(t *testing.T) {
+	// This catches a resource/relation lookup that loses the migration's exact
+	// prefix index and silently turns bounded snapshot queries into scans. The
+	// public API intentionally has no subject-filter query shape to invent here.
+	adapter := openMigratedStoreForTest(t)
+	revision := newSQLiteRevisionWrite(t, "tuple-plan", "plan.cdr", []byte("entity document {}"), time.Unix(1, 0).UTC())
+	if _, err := adapter.PutRevision(context.Background(), revision); err != nil {
+		t.Fatalf("PutRevision() error = %v", err)
+	}
+	request, tupleKey := newSQLiteTupleWriteRequest(t, "tuple-plan", revision.Metadata().ID(), "tuple-plan-key")
+	if _, err := adapter.WriteData(context.Background(), request); err != nil {
+		t.Fatalf("WriteData() error = %v", err)
+	}
+
+	conn, release, err := adapter.db.acquireReaderConnection(context.Background())
+	if err != nil {
+		t.Fatalf("acquireReaderConnection() error = %v", err)
+	}
+	defer release()
+	rows, err := conn.QueryContext(context.Background(), `EXPLAIN QUERY PLAN SELECT tuple_key, subject_type, subject_id, subject_relation, relation, resource_type, resource_id, expires_at_ns FROM tuples
+WHERE namespace = ? AND resource_type = ? AND resource_id = ? AND relation = ?
+AND (expires_at_ns IS NULL OR expires_at_ns > ?)
+ORDER BY subject_type, subject_id, subject_relation LIMIT ?`,
+		"tuple-plan", tupleKey.Tuple().Resource.Type, tupleKey.Tuple().Resource.ID, tupleKey.Tuple().Relation, time.Unix(100, 0).UTC().UnixNano(), 2,
+	)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN error = %v", err)
+	}
+	defer rows.Close()
+	usedIndex := false
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("EXPLAIN row scan error = %v", err)
+		}
+		usedIndex = usedIndex || strings.Contains(detail, "idx_tuples_namespace_resource_relation_subject")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("EXPLAIN rows error = %v", err)
+	}
+	if !usedIndex {
+		t.Fatal("resource/relation tuple query did not use idx_tuples_namespace_resource_relation_subject")
+	}
+}
+
+func sqliteDatabaseArtifactsForTest(t testing.TB, path string) map[string][]byte {
+	t.Helper()
+	artifacts := make(map[string][]byte)
+	for _, suffix := range []string{"-journal", "-shm", "-wal"} {
+		value, err := os.ReadFile(path + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", suffix, err)
+		}
+		artifacts[suffix] = value
+	}
+	return artifacts
+}
+
+func sqliteJournalModeForTest(t testing.TB, path string) string {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_query_only=1")
+	if err != nil {
+		t.Fatalf("sql.Open(read-only) error = %v", err)
+	}
+	defer database.Close()
+	var mode string
+	if err := database.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("PRAGMA journal_mode error = %v", err)
+	}
+	return mode
 }
 
 func TestCanonicalDataCodecsRoundTripAndRejectTrailingData(t *testing.T) {

@@ -190,3 +190,87 @@ func TestTwoPinnedSnapshotsDoNotBlockAWALDataCommit(t *testing.T) {
 		t.Fatalf("WriteData(second) = %#v, %v", committed.response, committed.err)
 	}
 }
+
+func TestStoreCloseDrainsPinnedSnapshotsBeforeReleasingMaintenanceLock(t *testing.T) {
+	// This catches Store.Close releasing the runtime shared lock and pools while
+	// a snapshot still owns a checked-out SQLite read transaction. Maintenance
+	// must remain blocked while the runtime is live, then succeed only after
+	// Store.Close has made the retained snapshot unusable and drained it.
+	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
+	if _, err := ApplyMigrations(context.Background(), config); err != nil {
+		t.Fatalf("ApplyMigrations() error = %v", err)
+	}
+	adapter, err := Open(config)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() { _ = adapter.Close() }()
+	request, err := store.NewSnapshotRequest("store-close-snapshot", 0, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatalf("NewSnapshotRequest() error = %v", err)
+	}
+	snapshot, err := adapter.OpenSnapshot(context.Background(), request)
+	if err != nil {
+		t.Fatalf("OpenSnapshot() error = %v", err)
+	}
+	defer func() { _ = snapshot.Close() }()
+
+	if output, lockErr := runLockHelper(config.Path, "exclusive"); lockErr == nil {
+		t.Fatalf("maintenance lock acquired while runtime snapshot was live: %q", output)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatalf("Store.Close() error = %v", err)
+	}
+	query, err := store.NewTupleQuery(dsl.EntityRef{Type: "document", ID: "doc"}, "viewer", 1)
+	if err != nil {
+		t.Fatalf("NewTupleQuery() error = %v", err)
+	}
+	if _, err := snapshot.QueryTuples(context.Background(), query); categoryOf(err) != policyengine.ErrorFailedPrecondition {
+		t.Fatalf("snapshot query after Store.Close category = %v, want FAILED_PRECONDITION", categoryOf(err))
+	}
+
+	maintenanceContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := ApplyMigrations(maintenanceContext, config); err != nil {
+		t.Fatalf("ApplyMigrations() after Store.Close error = %v", err)
+	}
+}
+
+func TestSnapshotCloseReportsRollbackFailureAndDiscardsReaderConnection(t *testing.T) {
+	// This catches close paths that hide a real ROLLBACK failure, return a
+	// different result on repeated Close, or put a transaction-uncertain reader
+	// connection back into the pool for later snapshots.
+	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
+	config.MaxReaders = 1
+	adapter, hooks := openMigratedStoreWithHooksForTest(t, config)
+	request, err := store.NewSnapshotRequest("rollback-close", 0, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatalf("NewSnapshotRequest() error = %v", err)
+	}
+	snapshot, err := adapter.OpenSnapshot(context.Background(), request)
+	if err != nil {
+		t.Fatalf("OpenSnapshot() error = %v", err)
+	}
+	connectionsBefore := hooks.readerConnectionCount()
+	closesBefore := hooks.readerConnectionCloseCount()
+	hooks.armNextSnapshotRollbackFailure()
+	firstClose := snapshot.Close()
+	if categoryOf(firstClose) != policyengine.ErrorUnavailable {
+		t.Fatalf("first snapshot Close() category = %v, want UNAVAILABLE", categoryOf(firstClose))
+	}
+	if repeatedClose := snapshot.Close(); repeatedClose != firstClose {
+		t.Fatalf("repeated snapshot Close() = %v, want original %v", repeatedClose, firstClose)
+	}
+	if got := hooks.readerConnectionCloseCount(); got <= closesBefore {
+		t.Fatalf("reader physical closes = %d, want discard after rollback failure (before %d)", got, closesBefore)
+	}
+
+	replacement, err := adapter.OpenSnapshot(context.Background(), request)
+	if err != nil {
+		t.Fatalf("replacement OpenSnapshot() error = %v", err)
+	}
+	defer func() { _ = replacement.Close() }()
+	if got := hooks.readerConnectionCount(); got <= connectionsBefore {
+		t.Fatalf("reader physical connections = %d, want fresh connection after discard (before %d)", got, connectionsBefore)
+	}
+}
