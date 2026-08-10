@@ -417,6 +417,16 @@ The no-follow fork and evidence chain are:
   `task5_privacy_event_test.go:generic-api-key:55`, and
   `task5_privacy_event_test.go:generic-api-key:56`.
 
+### Committed-input authorization gate
+
+On `d24c7ac`, the exact committed-input gate
+`GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final` passed from
+`2026-08-10T09:16:12Z` through `2026-08-10T09:18:26Z`. It passed the focused,
+durable, integrity/recovery, full-suite, race, vet, module-verification,
+format/lint/generation, SQLite no-follow manifest, public-boundary,
+vulnerability, and clean-diff/status checks. Gitleaks passed both the directory
+scan and its 66-commit history scan with no leaks.
+
 No production code is changed by this review-closure cleanup. The fresh
 reviews and clean whole-branch re-review authorize the next batch to be
 considered; they do not create a Batch 2B branch, tag, artifact, or execution.
