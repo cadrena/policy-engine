@@ -13,6 +13,12 @@ linters:
     - revive
     - staticcheck
     - unused
+  # This is an upstream driver source mirror, checked separately by its
+  # provenance manifest. Project style linters do not apply to its generated
+  # FFI patterns or preserved upstream formatting.
+  exclusions:
+    paths:
+      - internal/sqlitenofollow/
 
 formatters:
   enable:

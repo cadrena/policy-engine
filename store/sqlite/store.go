@@ -35,7 +35,7 @@ var _ store.Store = (*Store)(nil)
 // creates a database, applies migrations, or repairs durable state.
 func Open(config Config) (*Store, error) {
 	ctx := context.Background()
-	lock, err := acquireRuntimeSharedLock(ctx, config, false)
+	config, lock, err := acquireRuntimeSharedLock(ctx, config, false)
 	if err != nil {
 		return nil, err
 	}

@@ -14,8 +14,8 @@ import (
 	"time"
 
 	policyengine "github.com/cadrena/policy-engine"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 	"github.com/cadrena/policy-engine/store"
-	moderncsqlite "modernc.org/sqlite"
 )
 
 // FullIntegrityCheck verifies every durable record without repairing,
@@ -23,7 +23,18 @@ import (
 // exclusive offline operation: a compatible runtime or maintenance process
 // receives UNAVAILABLE instead of sharing a mutable database view.
 func FullIntegrityCheck(ctx context.Context, config Config) (err error) {
-	if err := validateMigrationRequest(ctx, config); err != nil {
+	return fullIntegrityCheckWithConnectorFactory(ctx, config, moderncsqlite.NewConnector)
+}
+
+// fullIntegrityCheckWithConnectorFactory keeps the offline checker on the
+// same physical connection path as production while allowing deterministic
+// connector-boundary checks of the default SQLite VFS.
+func fullIntegrityCheckWithConnectorFactory(ctx context.Context, config Config, newConnector connectorFactory) (err error) {
+	if newConnector == nil {
+		return sqliteError(policyengine.ErrorInvalidArgument)
+	}
+	config, err = validateMigrationRequest(ctx, config)
+	if err != nil {
 		return err
 	}
 	exists, err := sqliteDatabaseExists(config.Path)
@@ -53,7 +64,7 @@ func FullIntegrityCheck(ctx context.Context, config Config) (err error) {
 		return integrityResultError(ctx, err)
 	}
 
-	database, conn, err := openExistingIntegrityConnection(ctx, config)
+	database, conn, err := openExistingIntegrityConnectionWithConnectorFactory(ctx, config, newConnector)
 	if err != nil {
 		return integrityResultError(ctx, err)
 	}
@@ -149,8 +160,11 @@ func lockIntegrityExclusive(ctx context.Context, lock advisoryLock, timeout time
 	return nil
 }
 
-func openExistingIntegrityConnection(ctx context.Context, config Config) (*sql.DB, *sql.Conn, error) {
-	connector, err := moderncsqlite.NewConnector(integrityDSN(config))
+func openExistingIntegrityConnectionWithConnectorFactory(ctx context.Context, config Config, newConnector connectorFactory) (*sql.DB, *sql.Conn, error) {
+	if newConnector == nil {
+		return nil, nil, sqliteError(policyengine.ErrorInvalidArgument)
+	}
+	connector, err := newConnector(integrityDSN(config))
 	if err != nil {
 		return nil, nil, mapError(ctx, err)
 	}

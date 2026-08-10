@@ -13,8 +13,8 @@ import (
 
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 	"github.com/cadrena/policy-engine/store"
-	moderncsqlite "modernc.org/sqlite"
 )
 
 const (
@@ -37,10 +37,14 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 	if path == "" || ready == nil || release == nil {
 		t.Fatal("invalid recovery subprocess handshake")
 	}
+	canonicalPath, err := canonicalDatabasePath(path)
+	if err != nil {
+		t.Fatalf("canonicalize recovery subprocess database path: %v", err)
+	}
 	defer func() { _ = ready.Close() }()
 	defer func() { _ = release.Close() }()
 
-	config := validConfig(path)
+	config := validConfig(canonicalPath)
 	switch os.Getenv(sqliteRecoverySubprocessMode) {
 	case "committed":
 		if _, err := ApplyMigrations(context.Background(), config); err != nil {
@@ -61,7 +65,7 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 		// the committed WAL for the parent recovery process.
 		os.Exit(0)
 	case "uncommitted":
-		database, err := sql.Open("sqlite", "file:"+path+"?mode=rw")
+		database, err := sql.Open(moderncsqlite.DriverName, "file:"+canonicalPath+"?mode=rw")
 		if err != nil {
 			t.Fatalf("sql.Open() error = %v", err)
 		}
@@ -82,7 +86,7 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 		// This intentionally bypasses Cadrena's advisory sidecar. The parent
 		// checker must still receive SQLite BUSY while this external writer holds
 		// a real WAL write transaction.
-		database, err := sql.Open("sqlite", "file:"+path+"?mode=rw")
+		database, err := sql.Open(moderncsqlite.DriverName, "file:"+canonicalPath+"?mode=rw")
 		if err != nil {
 			t.Fatalf("sql.Open() error = %v", err)
 		}
@@ -107,7 +111,7 @@ func TestSubprocessSQLiteRecovery(t *testing.T) {
 		// Abrupt exit verifies kernel advisory-lock cleanup, not close behavior.
 		os.Exit(0)
 	case "hold-maintenance":
-		lock, err := newAdvisoryLock(path)
+		lock, err := newAdvisoryLock(canonicalPath)
 		if err != nil {
 			t.Fatalf("newAdvisoryLock() error = %v", err)
 		}

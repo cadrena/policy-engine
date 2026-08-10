@@ -7,7 +7,7 @@ import (
 	"syscall"
 
 	policyengine "github.com/cadrena/policy-engine"
-	moderncsqlite "modernc.org/sqlite"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 

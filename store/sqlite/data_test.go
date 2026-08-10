@@ -13,6 +13,7 @@ import (
 
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 	"github.com/cadrena/policy-engine/store"
 )
 
@@ -47,10 +48,7 @@ func TestOpenValidatesUnmigratedDatabaseBeforeStartingWritableRuntime(t *testing
 	// the file, SQLite sidecars, and journal mode unchanged and release its
 	// temporary runtime lock.
 	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
-	bootstrap, err := sql.Open("sqlite", "file:"+config.Path)
-	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
-	}
+	bootstrap := openRawSQLite(t, config.Path)
 	if _, err := bootstrap.Exec("CREATE TABLE unmigrated_marker(value TEXT NOT NULL)"); err != nil {
 		_ = bootstrap.Close()
 		t.Fatalf("CREATE TABLE error = %v", err)
@@ -264,7 +262,11 @@ func sqliteDatabaseArtifactsForTest(t testing.TB, path string) map[string][]byte
 
 func sqliteJournalModeForTest(t testing.TB, path string) string {
 	t.Helper()
-	database, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_query_only=1")
+	canonicalPath, err := canonicalDatabasePath(path)
+	if err != nil {
+		t.Fatalf("canonicalize read-only SQLite database path: %v", err)
+	}
+	database, err := sql.Open(moderncsqlite.DriverName, "file:"+canonicalPath+"?mode=ro&_query_only=1")
 	if err != nil {
 		t.Fatalf("sql.Open(read-only) error = %v", err)
 	}

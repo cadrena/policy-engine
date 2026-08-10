@@ -17,7 +17,7 @@ import (
 	"time"
 
 	policyengine "github.com/cadrena/policy-engine"
-	moderncsqlite "modernc.org/sqlite"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 )
 
 const schemaMigrationsTable = "schema_migrations"
@@ -72,7 +72,18 @@ type ledgerState struct {
 // PlanMigrations verifies the durable migration ledger and reports the
 // embedded migrations not yet applied. It does not create a missing database.
 func PlanMigrations(ctx context.Context, config Config) (MigrationPlan, error) {
-	if err := validateMigrationRequest(ctx, config); err != nil {
+	return planMigrationsWithConnectorFactory(ctx, config, moderncsqlite.NewConnector)
+}
+
+// planMigrationsWithConnectorFactory keeps planning on the same physical
+// connection path as production while allowing deterministic connector-boundary
+// checks of the default SQLite VFS.
+func planMigrationsWithConnectorFactory(ctx context.Context, config Config, newConnector connectorFactory) (MigrationPlan, error) {
+	if newConnector == nil {
+		return MigrationPlan{}, sqliteError(policyengine.ErrorInvalidArgument)
+	}
+	config, err := validateMigrationRequest(ctx, config)
+	if err != nil {
 		return MigrationPlan{}, err
 	}
 	migrations, err := loadEmbeddedMigrations()
@@ -97,7 +108,7 @@ func PlanMigrations(ctx context.Context, config Config) (MigrationPlan, error) {
 		return MigrationPlan{}, err
 	}
 
-	database, conn, err := openMigrationConnection(ctx, config, true)
+	database, conn, err := openMigrationConnectionWithConnectorFactory(ctx, config, true, newConnector)
 	if err != nil {
 		return MigrationPlan{}, err
 	}
@@ -121,7 +132,18 @@ func ApplyMigrations(ctx context.Context, config Config) (MigrationResult, error
 }
 
 func applyMigrationsWith(ctx context.Context, config Config, migrations []migration) (result MigrationResult, err error) {
-	if err := validateMigrationRequest(ctx, config); err != nil {
+	return applyMigrationsWithConnectorFactory(ctx, config, migrations, moderncsqlite.NewConnector)
+}
+
+// applyMigrationsWithConnectorFactory keeps migration application on the same
+// physical connection path as production while allowing deterministic
+// connector-boundary checks of the default SQLite VFS.
+func applyMigrationsWithConnectorFactory(ctx context.Context, config Config, migrations []migration, newConnector connectorFactory) (result MigrationResult, err error) {
+	if newConnector == nil {
+		return MigrationResult{}, sqliteError(policyengine.ErrorInvalidArgument)
+	}
+	config, err = validateMigrationRequest(ctx, config)
+	if err != nil {
 		return MigrationResult{}, err
 	}
 	if err := validateMigrationSet(migrations); err != nil {
@@ -141,7 +163,7 @@ func applyMigrationsWith(ctx context.Context, config Config, migrations []migrat
 		return MigrationResult{}, mapError(ctx, err)
 	}
 
-	database, conn, err := openMigrationConnection(ctx, config, false)
+	database, conn, err := openMigrationConnectionWithConnectorFactory(ctx, config, false, newConnector)
 	if err != nil {
 		return MigrationResult{}, err
 	}
@@ -231,7 +253,9 @@ func seedInitialCursorKey(ctx context.Context, conn *sql.Conn) error {
 // ledger, schema, indexes, foreign keys, checks, and connection pragmas. It
 // never creates a missing database or applies migrations.
 func ValidateSchema(ctx context.Context, config Config) error {
-	if err := validateMigrationRequest(ctx, config); err != nil {
+	var err error
+	config, err = validateMigrationRequest(ctx, config)
+	if err != nil {
 		return err
 	}
 
@@ -258,7 +282,8 @@ func ValidateSchema(ctx context.Context, config Config) error {
 // a read-only connection. Its caller owns the compatible shared advisory lock
 // for the entire validation interval.
 func validateSchemaUnderSharedLock(ctx context.Context, config Config) error {
-	if err := validateMigrationRequest(ctx, config); err != nil {
+	config, err := validateMigrationRequest(ctx, config)
+	if err != nil {
 		return err
 	}
 	migrations, err := loadEmbeddedMigrations()
@@ -296,14 +321,22 @@ func validateSchemaUnderSharedLock(ctx context.Context, config Config) error {
 	return validateSchemaV1(ctx, conn)
 }
 
-func validateMigrationRequest(ctx context.Context, config Config) error {
+func validateMigrationRequest(ctx context.Context, config Config) (Config, error) {
 	if err := contextError(ctx); err != nil {
-		return err
+		return Config{}, err
 	}
 	if err := config.validate(); err != nil {
-		return err
+		return Config{}, err
 	}
-	return validateSupportedFilesystem(ctx, config.Path)
+	var err error
+	config, err = canonicalizeDatabaseConfig(config)
+	if err != nil {
+		return Config{}, mapError(ctx, err)
+	}
+	if err := validateSupportedFilesystem(ctx, config.Path); err != nil {
+		return Config{}, err
+	}
+	return config, nil
 }
 
 func loadEmbeddedMigrations() ([]migration, error) {
@@ -389,13 +422,20 @@ func sqliteDatabaseExists(path string) (bool, error) {
 }
 
 func openMigrationConnection(ctx context.Context, config Config, reader bool) (*sql.DB, *sql.Conn, error) {
+	return openMigrationConnectionWithConnectorFactory(ctx, config, reader, moderncsqlite.NewConnector)
+}
+
+func openMigrationConnectionWithConnectorFactory(ctx context.Context, config Config, reader bool, newConnector connectorFactory) (*sql.DB, *sql.Conn, error) {
+	if newConnector == nil {
+		return nil, nil, sqliteError(policyengine.ErrorInvalidArgument)
+	}
 	dsn := databaseDSN(config, reader)
 	if reader {
 		// Schema validation must never promote journal mode, create a file, or
 		// initialize a writable runtime pool before the durable schema passes.
 		dsn = databaseDSNMode(config, true, false)
 	}
-	connector, err := moderncsqlite.NewConnector(dsn)
+	connector, err := newConnector(dsn)
 	if err != nil {
 		return nil, nil, mapError(ctx, err)
 	}

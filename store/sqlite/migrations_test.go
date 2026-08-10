@@ -14,7 +14,7 @@ import (
 	"time"
 
 	policyengine "github.com/cadrena/policy-engine"
-	_ "modernc.org/sqlite"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 )
 
 func TestEmbeddedMigrationsAreOrderedAndChecksumExactBytes(t *testing.T) {
@@ -396,7 +396,11 @@ func applyMigrationsWithoutPanic(config Config) (result MigrationResult, panicVa
 
 func openRawSQLite(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
+	canonicalPath, err := canonicalDatabasePath(path)
+	if err != nil {
+		t.Fatalf("canonicalize raw SQLite database path: %v", err)
+	}
+	db, err := sql.Open(moderncsqlite.DriverName, canonicalPath)
 	if err != nil {
 		t.Fatalf("open raw SQLite database: %v", err)
 	}

@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	policyengine "github.com/cadrena/policy-engine"
-	moderncsqlite "modernc.org/sqlite"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 )
 
 // sqliteLifecycleTestHooks are held by one test connector instance. They are

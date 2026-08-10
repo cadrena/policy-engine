@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 	"github.com/cadrena/policy-engine/store/sqlite"
-	_ "modernc.org/sqlite"
 )
 
 func TestRunMigrateThenValidate(t *testing.T) {
@@ -235,7 +235,12 @@ func assertRunIntegrityFailure(ctx context.Context, t *testing.T, path string, w
 
 func openCLIPlainSQLite(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
+	canonicalParent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("canonicalize raw SQLite parent: %v", err)
+	}
+	canonicalPath := filepath.Join(canonicalParent, filepath.Base(path))
+	db, err := sql.Open(moderncsqlite.DriverName, canonicalPath)
 	if err != nil {
 		t.Fatalf("open raw SQLite database: %v", err)
 	}

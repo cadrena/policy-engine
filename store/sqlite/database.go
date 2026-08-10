@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	policyengine "github.com/cadrena/policy-engine"
-	moderncsqlite "modernc.org/sqlite"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 )
 
 // database is the private durable SQLite foundation. It is intentionally not
@@ -55,7 +55,7 @@ func openExistingDatabaseWithLock(ctx context.Context, config Config, lock advis
 }
 
 func openDatabaseWithConnectorFactoryMode(ctx context.Context, config Config, newConnector connectorFactory, create bool) (_ *database, err error) {
-	lock, err := acquireRuntimeSharedLock(ctx, config, create)
+	config, lock, err := acquireRuntimeSharedLock(ctx, config, create)
 	if err != nil {
 		return nil, err
 	}
@@ -70,48 +70,53 @@ func openDatabaseWithConnectorFactoryMode(ctx context.Context, config Config, ne
 // acquireRuntimeSharedLock owns the existing-only checks that must happen
 // before any lock sidecar or SQLite runtime connection is created. Its caller
 // transfers the held lock to a database lifetime or closes it on failure.
-func acquireRuntimeSharedLock(ctx context.Context, config Config, create bool) (advisoryLock, error) {
+func acquireRuntimeSharedLock(ctx context.Context, config Config, create bool) (Config, advisoryLock, error) {
 	if err := contextError(ctx); err != nil {
-		return nil, err
+		return Config{}, nil, err
 	}
 	if err := config.validate(); err != nil {
-		return nil, err
+		return Config{}, nil, err
+	}
+	var err error
+	config, err = canonicalizeDatabaseConfig(config)
+	if err != nil {
+		return Config{}, nil, mapError(ctx, err)
 	}
 	if err := validateSupportedFilesystem(ctx, config.Path); err != nil {
-		return nil, err
+		return Config{}, nil, err
 	}
 	// A public existing-only open must not leave even an advisory-lock sidecar
 	// behind for a path that does not name a durable database.
 	if !create {
 		exists, statErr := sqliteDatabaseExists(config.Path)
 		if statErr != nil {
-			return nil, mapError(ctx, statErr)
+			return Config{}, nil, mapError(ctx, statErr)
 		}
 		if !exists {
-			return nil, sqliteError(policyengine.ErrorFailedPrecondition)
+			return Config{}, nil, sqliteError(policyengine.ErrorFailedPrecondition)
 		}
 	}
 
 	lock, err := newAdvisoryLock(config.Path)
 	if err != nil {
-		return nil, mapError(ctx, err)
+		return Config{}, nil, mapError(ctx, err)
 	}
 	if err := lock.LockShared(ctx); err != nil {
 		_ = lock.Close()
-		return nil, err
+		return Config{}, nil, err
 	}
 	if !create {
 		exists, statErr := sqliteDatabaseExists(config.Path)
 		if statErr != nil {
 			_ = lock.Close()
-			return nil, mapError(ctx, statErr)
+			return Config{}, nil, mapError(ctx, statErr)
 		}
 		if !exists {
 			_ = lock.Close()
-			return nil, sqliteError(policyengine.ErrorFailedPrecondition)
+			return Config{}, nil, sqliteError(policyengine.ErrorFailedPrecondition)
 		}
 	}
-	return lock, nil
+	return config, lock, nil
 }
 
 // openDatabaseWithConnectorFactoryModeAndLock creates runtime pools only after

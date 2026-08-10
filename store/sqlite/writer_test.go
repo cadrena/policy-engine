@@ -12,7 +12,7 @@ import (
 	"time"
 
 	policyengine "github.com/cadrena/policy-engine"
-	moderncsqlite "modernc.org/sqlite"
+	moderncsqlite "github.com/cadrena/policy-engine/internal/sqlitenofollow"
 )
 
 func TestWriterCommitsAcceptedWritesInOrder(t *testing.T) {
@@ -134,7 +134,7 @@ func TestWriterUsesBeginImmediateBeforeInvokingCallback(t *testing.T) {
 	defer func() { _ = database.Close() }()
 	createWriterTable(t, database)
 
-	connector, err := moderncsqlite.NewConnector(databaseDSN(config, false))
+	connector, err := moderncsqlite.NewConnector(databaseDSN(database.config, false))
 	if err != nil {
 		t.Fatalf("NewConnector() error = %v", err)
 	}
@@ -332,7 +332,11 @@ func newWriterDatabase(t *testing.T) *database {
 func newFaultWriterDatabase(t *testing.T, faults *writerFaults) *database {
 	t.Helper()
 	config := validConfig(filepath.Join(t.TempDir(), "policy.db"))
-	writerDSN := databaseDSN(config, false)
+	canonicalConfig, err := canonicalizeDatabaseConfig(config)
+	if err != nil {
+		t.Fatalf("canonicalize fault writer database path: %v", err)
+	}
+	writerDSN := databaseDSN(canonicalConfig, false)
 	database, err := openDatabaseWithConnectorFactory(context.Background(), config, func(dsn string) (driver.Connector, error) {
 		connector, err := moderncsqlite.NewConnector(dsn)
 		if err != nil {

@@ -4,9 +4,9 @@ GOLANGCI_LINT_VERSION ?= v2.1.6
 GOVULNCHECK_VERSION ?= v1.1.4
 GITLEAKS_VERSION ?= v8.30.1
 
-.PHONY: all batch-2a-final batch-2a-focused boundary boundary-test fmt-check generated-check gitleaks lint race test vet vuln-check
+.PHONY: all batch-2a-final batch-2a-focused boundary boundary-test fmt-check generated-check gitleaks lint race sqlitenofollow-manifest test vet vuln-check
 
-all: fmt-check lint test race vet generated-check vuln-check boundary boundary-test gitleaks
+all: fmt-check lint test race vet generated-check sqlitenofollow-manifest vuln-check boundary boundary-test gitleaks
 
 # These release gates deliberately spell out every command so a local Make run
 # uses the same toolchain and coverage as the recorded Batch 2A evidence.
@@ -22,9 +22,9 @@ batch-2a-final:
 	$(MAKE) batch-2a-focused
 	$(GO) test ./... -count=3
 	$(GO) test -race ./... -count=1
-	$(GO) vet ./...
+	$(MAKE) vet
 	$(GO) mod verify
-	$(MAKE) fmt-check lint generated-check
+	$(MAKE) fmt-check lint generated-check sqlitenofollow-manifest
 	$(MAKE) boundary boundary-test
 	$(MAKE) vuln-check
 	$(MAKE) gitleaks
@@ -47,7 +47,12 @@ race:
 	$(GO) test -race ./...
 
 vet:
-	$(GO) vet ./...
+	# The preserved modernc driver mirror intentionally uses uintptr-backed FFI
+	# patterns which its own source triggers under vet's unsafeptr analyzer.
+	# Keep all regular vet analyzers for every project package, and all except
+	# unsafeptr for this one reviewed upstream mirror.
+	@$(GO) list ./... | grep -v '/internal/sqlitenofollow$$' | xargs $(GO) vet
+	$(GO) vet -unsafeptr=false ./internal/sqlitenofollow
 
 lint:
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run
@@ -59,6 +64,9 @@ generated-check:
 		printf 'go generate left repository changes:\n%s\n' "$$status"; \
 		exit 1; \
 	fi
+
+sqlitenofollow-manifest:
+	sh scripts/check-sqlitenofollow-manifest.sh
 
 vuln-check:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
