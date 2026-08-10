@@ -116,13 +116,34 @@ func TestOpenValidatesUnmigratedDatabaseBeforeStartingWritableRuntime(t *testing
 
 func TestDataCodecsRejectInvalidTagsCountsAndOversizedLengthHeaders(t *testing.T) {
 	// This catches a decoder that trusts a tag/count/declared length before
-	// validation, allocates a claimed payload, or lets malformed durable bytes
-	// reach a public constructor.
+	// validation, allocates a claimed payload, or bypasses public constructors
+	// after a structurally valid durable decode.
+	const (
+		tupleResourceTypeCanary   = "resource-type-canary"
+		attributeEntityTypeCanary = "entity-type-canary"
+		attributePathCanary       = "path-segment-canary"
+	)
 	for _, test := range []struct {
-		name   string
-		decode func() error
+		name     string
+		decode   func() error
+		canaries []string
 	}{
 		{name: "tuple version", decode: func() error { _, err := decodeTupleKey([]byte{codecVersion + 1}); return err }},
+		{name: "tuple resource type rejected by constructor", canaries: []string{tupleResourceTypeCanary}, decode: func() error {
+			// Version and every string16 length are hand-written. The resource
+			// type is a valid-length UTF-8 string with an unsafe leading NUL;
+			// all other tuple fields are valid so NewTupleKey is the rejection.
+			_, err := decodeTupleKey([]byte{
+				1,
+				0, 21, 0, 'r', 'e', 's', 'o', 'u', 'r', 'c', 'e', '-', 't', 'y', 'p', 'e', '-', 'c', 'a', 'n', 'a', 'r', 'y',
+				0, 18, 'r', 'e', 's', 'o', 'u', 'r', 'c', 'e', '-', 'i', 'd', '-', 'c', 'a', 'n', 'a', 'r', 'y',
+				0, 6, 'v', 'i', 'e', 'w', 'e', 'r',
+				0, 5, 'g', 'r', 'o', 'u', 'p',
+				0, 17, 's', 'u', 'b', 'j', 'e', 'c', 't', '-', 'i', 'd', '-', 'c', 'a', 'n', 'a', 'r', 'y',
+				0, 6, 'm', 'e', 'm', 'b', 'e', 'r',
+			})
+			return err
+		}},
 		{name: "attribute value tag", decode: func() error { _, err := decodeAttributeValue([]byte{codecVersion, 0xff}); return err }},
 		{name: "attribute boolean payload", decode: func() error {
 			_, err := decodeAttributeValue([]byte{codecVersion, attributeValueBoolean, 2})
@@ -134,8 +155,29 @@ func TestDataCodecsRejectInvalidTagsCountsAndOversizedLengthHeaders(t *testing.T
 		}},
 		{name: "attribute path zero count", decode: func() error { _, err := decodeAttributePath([]byte{codecVersion, 0, 0, 0, 0}); return err }},
 		{name: "attribute path oversized count", decode: func() error { _, err := decodeAttributePath([]byte{codecVersion, 0x00, 0x01, 0x86, 0xa1}); return err }},
+		{name: "attribute path segment rejected by constructor", canaries: []string{attributePathCanary}, decode: func() error {
+			// A one-segment V1 path with the exact 19-byte segment is structurally
+			// complete. Its hyphens violate the public DSL-identifier rule.
+			_, err := decodeAttributePath([]byte{
+				1, 0, 0, 0, 1, 0, 19,
+				'p', 'a', 't', 'h', '-', 's', 'e', 'g', 'm', 'e', 'n', 't', '-', 'c', 'a', 'n', 'a', 'r', 'y',
+			})
+			return err
+		}},
 		{name: "attribute key oversized nested payload", decode: func() error {
 			_, err := decodeAttributeKey([]byte{codecVersion, 0, 1, 'e', 0, 1, 'i', 0x00, 0x40, 0x00, 0x01})
+			return err
+		}},
+		{name: "attribute entity type rejected by constructor", canaries: []string{attributeEntityTypeCanary}, decode: func() error {
+			// The outer key and its 17-byte nested V1 path are fully formed.
+			// Only the leading NUL in the entity type is semantically invalid.
+			_, err := decodeAttributeKey([]byte{
+				1,
+				0, 19, 0, 'e', 'n', 't', 'i', 't', 'y', '-', 't', 'y', 'p', 'e', '-', 'c', 'a', 'n', 'a', 'r', 'y',
+				0, 16, 'e', 'n', 't', 'i', 't', 'y', '-', 'i', 'd', '-', 'c', 'a', 'n', 'a', 'r', 'y',
+				0, 0, 0, 17,
+				1, 0, 0, 0, 1, 0, 10, 'v', 'a', 'l', 'i', 'd', '_', 'p', 'a', 't', 'h',
+			})
 			return err
 		}},
 		{name: "idempotency response tag", decode: func() error { _, err := decodeIdempotencyResponse([]byte{codecVersion, 0}, false); return err }},
@@ -143,8 +185,19 @@ func TestDataCodecsRejectInvalidTagsCountsAndOversizedLengthHeaders(t *testing.T
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			err := test.decode()
+			if err == nil {
+				t.Fatal("decoder accepted invalid durable bytes")
+			}
 			if categoryOf(err) != policyengine.ErrorIntegrity {
 				t.Fatalf("decoder category = %v, want INTEGRITY", categoryOf(err))
+			}
+			if got := err.Error(); got != policyengine.ErrorIntegrity.String() {
+				t.Fatalf("decoder error = %q, want sanitized INTEGRITY", got)
+			}
+			for _, canary := range test.canaries {
+				if strings.Contains(err.Error(), canary) {
+					t.Fatalf("decoder error leaked invalid durable canary %q in %q", canary, err)
+				}
 			}
 		})
 	}
