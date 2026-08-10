@@ -205,6 +205,22 @@ format/lint/generation, boundary checks, vulnerability scan, gitleaks,
 whitespace diff check, and clean-status check. Post-target
 `rtk git status --short --branch` was clean and `rtk git diff --check` passed.
 
+### Post-evidence aggregate gate
+
+Corrective evidence commit `cf0ae2e0d86c42e50869f31fcc4737a899c92781`, which
+records implementation commit `affc22304524f9afb48c2321a9c73abbfeac54f3`,
+also passed the complete post-evidence aggregate target. The command used the
+same command-local checksum database setting in UTC window
+`2026-08-10T05:03:46Z` through `2026-08-10T05:06:00Z`, exited 0, and left a
+clean worktree:
+
+```text
+rtk run 'env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final'
+```
+
+This post-evidence PASS is evidence only; it does not replace either required
+fresh review or change the terminal blocked decision below.
+
 Deferred minor: `.gitleaksignore` contains an exact SDD fingerprint and is
 safe in scope, but it couples secret-scanning policy to an ignored artifact.
 It remains unchanged in this corrective fix and should be reconsidered during
