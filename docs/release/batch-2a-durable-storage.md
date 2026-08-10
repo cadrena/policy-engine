@@ -297,6 +297,24 @@ from the scanned worktree; then record a passing
 covering both directory and history scans. The SDD artifact remains retained
 for this review, so line 1 remains necessary and unchanged.
 
+### Post-remediation-evidence aggregate gate
+
+Evidence commit `670bb8ee3769f73452a9685e06ef5f574af5d95c`, which records the
+remediation implementation and its committed-input gate, also passed the exact
+post-evidence aggregate target. The clean committed-input run used the same
+command-local checksum and toolchain settings from `2026-08-10T05:57:23Z`
+through `2026-08-10T05:59:36Z`:
+
+```text
+rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final
+```
+
+It passed focused repeats, normal and race suites, vet, module verification,
+format/lint/generation, boundary and vulnerability checks, gitleaks directory
+and 61-commit-history scans, whitespace diff check, and clean-status check.
+This final evidence record does not replace the pending fresh reviews or alter
+the blocked decision.
+
 ## Review state and non-goals
 
 | scope | fresh review verdict |
