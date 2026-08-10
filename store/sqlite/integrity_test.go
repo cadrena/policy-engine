@@ -271,6 +271,26 @@ func TestIntegrityOpenRejectsBoundedRuntimeCursorAndHeadViolations(t *testing.T)
 	}
 }
 
+func TestIntegrityOpenRejectsPersistedEventBeyondNamespaceHead(t *testing.T) {
+	// This catches a bounded startup validator that trusts a namespace event
+	// head without asking the primary-key-indexed event table whether a durable
+	// event sequence has advanced beyond it. The fixture contains committed
+	// events produced through the public Store, then corrupts only the head.
+	config := migratedIntegrityConfig(t)
+	populateIntegrityFixture(t, config)
+	mutateIntegrityDatabase(t, config, func(t *testing.T, db *sql.DB) {
+		mustExecMigrationTest(t, db, "UPDATE namespace_heads SET event_sequence = event_sequence - 1 WHERE namespace = 'integrity-fixture'")
+	})
+
+	opened, err := Open(config)
+	if opened != nil || categoryOf(err) != policyengine.ErrorIntegrity {
+		if opened != nil {
+			_ = opened.Close()
+		}
+		t.Fatalf("Open(event sequence beyond head) = %v, %v; want nil INTEGRITY", opened, err)
+	}
+}
+
 func TestIntegrityFullCheckPreservesCanceledAndDeadlineContexts(t *testing.T) {
 	// This catches a checker that remaps caller cancellation into corruption or
 	// tries to acquire an exclusive lock after the public context is unusable.

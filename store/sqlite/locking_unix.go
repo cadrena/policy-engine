@@ -19,12 +19,8 @@ type unixAdvisoryLock struct {
 }
 
 func newAdvisoryLock(databasePath string) (advisoryLock, error) {
-	file, err := os.OpenFile(lockFilePath(databasePath), os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := openOwnerOnlyRegularFile(lockFilePath(databasePath))
 	if err != nil {
-		return nil, mapError(context.Background(), err)
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
 		return nil, mapError(context.Background(), err)
 	}
 	return &unixAdvisoryLock{file: file}, nil

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,6 +75,9 @@ func acquireRuntimeSharedLock(ctx context.Context, config Config, create bool) (
 		return nil, err
 	}
 	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	if err := validateSupportedFilesystem(ctx, config.Path); err != nil {
 		return nil, err
 	}
 	// A public existing-only open must not leave even an advisory-lock sidecar
@@ -227,12 +229,8 @@ func (d *database) closeResources() error {
 }
 
 func ensureOwnerOnlyDatabaseFile(path string) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := openOwnerOnlyRegularFile(path)
 	if err != nil {
-		return err
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
 		return err
 	}
 	return file.Close()

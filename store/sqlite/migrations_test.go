@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	policyengine "github.com/cadrena/policy-engine"
 	_ "modernc.org/sqlite"
@@ -118,6 +120,45 @@ func TestApplyMigrationsCreatesSchemaAndExactLedgerRecord(t *testing.T) {
 	}
 	if appliedAt != "1970-01-01T00:00:00Z" {
 		t.Fatalf("ledger applied_at = %q, want UTC RFC3339Nano fixed-clock value", appliedAt)
+	}
+}
+
+func TestApplyMigrationsRejectsPanicAndZeroClocksWithoutDurableLedger(t *testing.T) {
+	// This catches a migration timestamp that can either unwind the process or
+	// commit a zero value into the durable ledger. Both must fail internally,
+	// without revealing a clock panic or leaving migration state committed.
+	for _, tc := range []struct {
+		name  string
+		clock Clock
+	}{
+		{
+			name: "panic",
+			clock: migrationClockFunc(func() time.Time {
+				panic("MIGRATION_CLOCK_CANARY")
+			}),
+		},
+		{
+			name:  "zero",
+			clock: migrationClockFunc(func() time.Time { return time.Time{} }),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "policy.db")
+			config := validConfig(path)
+			config.Clock = tc.clock
+
+			_, err, panicValue := applyMigrationsWithoutPanic(config)
+			if panicValue != nil {
+				t.Fatalf("ApplyMigrations() panicked: %v", panicValue)
+			}
+			if got := categoryOf(err); got != policyengine.ErrorInternal {
+				t.Fatalf("ApplyMigrations() category = %v, want %v", got, policyengine.ErrorInternal)
+			}
+			if err == nil || strings.Contains(err.Error(), "MIGRATION_CLOCK_CANARY") {
+				t.Fatalf("ApplyMigrations() leaked clock detail: %v", err)
+			}
+			assertNoCommittedMigrationLedger(t, path)
+		})
 	}
 }
 
@@ -327,6 +368,30 @@ func assertNoMigrationArtifacts(t *testing.T, path string) {
 			t.Fatalf("planning created artifact %q: stat error = %v", artifact, err)
 		}
 	}
+}
+
+func assertNoCommittedMigrationLedger(t *testing.T, path string) {
+	t.Helper()
+	db := openRawSQLite(t, path)
+	for _, table := range []string{"schema_migrations", "cadrena_meta"} {
+		var count int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&count); err != nil {
+			t.Fatalf("inspect %s after rejected migration: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("rejected migration committed %s", table)
+		}
+	}
+}
+
+type migrationClockFunc func() time.Time
+
+func (f migrationClockFunc) Now() time.Time { return f() }
+
+func applyMigrationsWithoutPanic(config Config) (result MigrationResult, err error, panicValue any) {
+	defer func() { panicValue = recover() }()
+	result, err = ApplyMigrations(context.Background(), config)
+	return result, err, nil
 }
 
 func openRawSQLite(t *testing.T, path string) *sql.DB {

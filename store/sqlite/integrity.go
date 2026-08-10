@@ -552,6 +552,37 @@ func validateRuntimeNamespaceHeads(ctx context.Context, conn *sql.Conn) error {
 	if err := rows.Err(); err != nil {
 		return integrityResultError(ctx, mapError(ctx, err))
 	}
+	return validateRuntimeEventHeadBounds(ctx, conn)
+}
+
+// validateRuntimeEventHeadBounds is intentionally a bounded relation check:
+// namespace_heads remains the outer startup metadata scan, while the
+// state_events primary key answers each namespace probe without decoding or
+// scanning event payloads. FullIntegrityCheck still owns exhaustive event
+// validation.
+func validateRuntimeEventHeadBounds(ctx context.Context, conn *sql.Conn) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	var found int
+	err := conn.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1
+		FROM namespace_heads AS heads
+		WHERE EXISTS (
+			SELECT 1
+			FROM state_events AS events
+			WHERE events.namespace = heads.namespace
+			  AND events.sequence > heads.event_sequence
+			LIMIT 1
+		)
+		LIMIT 1
+	)`).Scan(&found)
+	if err != nil {
+		return integrityResultError(ctx, mapError(ctx, err))
+	}
+	if found != 0 {
+		return sqliteError(policyengine.ErrorIntegrity)
+	}
 	return nil
 }
 

@@ -180,6 +180,10 @@ func applyMigrationsWith(ctx context.Context, config Config, migrations []migrat
 	result.Previous = ledger.current
 	result.Current = ledger.current
 	for _, pending := range migrations[ledger.current:] {
+		appliedAt, _, clockErr := canonicalClockNow(config.Clock)
+		if clockErr != nil {
+			return MigrationResult{}, clockErr
+		}
 		if _, err := conn.ExecContext(ctx, string(pending.SQL)); err != nil {
 			return MigrationResult{}, mapError(ctx, err)
 		}
@@ -194,7 +198,7 @@ func applyMigrationsWith(ctx context.Context, config Config, migrations []migrat
 			pending.Version,
 			pending.Name,
 			hex.EncodeToString(pending.SHA256[:]),
-			config.Clock.Now().UTC().Format(time.RFC3339Nano),
+			appliedAt.Format(time.RFC3339Nano),
 		); err != nil {
 			return MigrationResult{}, mapError(ctx, err)
 		}
@@ -296,7 +300,10 @@ func validateMigrationRequest(ctx context.Context, config Config) error {
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	return config.validate()
+	if err := config.validate(); err != nil {
+		return err
+	}
+	return validateSupportedFilesystem(ctx, config.Path)
 }
 
 func loadEmbeddedMigrations() ([]migration, error) {
@@ -366,8 +373,13 @@ func migrationPlan(current uint64, migrations []migration) MigrationPlan {
 }
 
 func sqliteDatabaseExists(path string) (bool, error) {
-	_, err := os.Stat(path)
+	// Existing durable databases must name a regular file. The create path also
+	// verifies its opened descriptor with O_NOFOLLOW+fstat before SQLite runs.
+	info, err := os.Lstat(path)
 	if err == nil {
+		if !info.Mode().IsRegular() {
+			return false, sqliteError(policyengine.ErrorFailedPrecondition)
+		}
 		return true, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {

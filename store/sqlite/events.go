@@ -80,6 +80,17 @@ func (s *Store) effectiveNow(ctx context.Context, conn *sql.Conn, namespace stri
 }
 
 func (s *Store) now() (result time.Time, nanos int64, err error) {
+	if s == nil || s.db == nil {
+		return time.Time{}, 0, sqliteError(policyengine.ErrorInternal)
+	}
+	return canonicalClockNow(s.db.config.Clock)
+}
+
+// canonicalClockNow is the shared boundary for all durable timestamps. It
+// turns a faulty injected Clock (including panic, nil, zero, or a value that
+// cannot be represented as canonical UTC nanoseconds) into a sanitized
+// internal error before a caller can persist it.
+func canonicalClockNow(clock Clock) (result time.Time, nanos int64, err error) {
 	defer func() {
 		if recover() != nil {
 			result = time.Time{}
@@ -87,10 +98,10 @@ func (s *Store) now() (result time.Time, nanos int64, err error) {
 			err = sqliteError(policyengine.ErrorInternal)
 		}
 	}()
-	if s == nil || s.db == nil || s.db.config.Clock == nil {
+	if isNilClock(clock) {
 		return time.Time{}, 0, sqliteError(policyengine.ErrorInternal)
 	}
-	result, nanos, ok := sqliteTimestamp(s.db.config.Clock.Now())
+	result, nanos, ok := sqliteTimestamp(clock.Now())
 	if !ok {
 		return time.Time{}, 0, sqliteError(policyengine.ErrorInternal)
 	}
