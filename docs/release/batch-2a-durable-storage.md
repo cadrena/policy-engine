@@ -4,14 +4,15 @@
 
 The original implementation and repository gates passed on candidate
 `c81ccabe5af4901027dc5ab68ea87cf00dfa650c`; the corrective Task 6 gate passed
-on `affc22304524f9afb48c2321a9c73abbfeac54f3`; and the final whole-branch
-review remediation gate passed on
-`5e730d32ad160c09ce88d48f1c8ee2880bec2c73`. The required fresh Task 6 review
-and required fresh whole-branch review have still not occurred. This document
-therefore records a blocked decision rather than inferring authorization from
-test results or remediation work. The subsequent SQLite no-follow remediation
-gate passed on `f6648fdb5f73fb7afd987f9a579cd76b4c7d6ed6`; it likewise changes
-no authorization decision.
+on `affc22304524f9afb48c2321a9c73abbfeac54f3`; the final whole-branch
+remediation gate passed on `5e730d32ad160c09ce88d48f1c8ee2880bec2c73`; and
+the SQLite no-follow remediation gate passed on
+`f6648fdb5f73fb7afd987f9a579cd76b4c7d6ed6`. A fresh Task 6 re-review returned
+**APPROVE**, the clean whole-branch re-review closed its recorded finding/fix
+rounds, and the final no-follow re-review returned **SHIP**. The historical
+blocked decisions below are superseded by that review closure; this document
+authorizes Batch 2B consideration only and does not imply that Batch 2B has
+started.
 
 ## Candidate and commit chain
 
@@ -24,7 +25,7 @@ Merge base: `846fb7b0a6bb24eff31d350d727b0ff68ea3f9a9`.
 | 3 | `62cdd9b`, `a2fc373` |
 | 4 | `bbb84a1`, `6d8151a` |
 | 5 | `b079ed0`, `b3e1e1b`, `44494d5` |
-| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist), `cf4765` (initial blocked evidence), `affc223` (corrective integrity invariants and WAL preservation), `3aaf5c2` (final review hardening), `5e730d3` (test-only lint correction), `f6648fd` (SQLite no-follow remediation) |
+| 6 | `084ffd6` (integrity/recovery implementation), `cf0e558` (lint gate cleanup), `c81ccab` (verified gitleaks false-positive allowlist), `cf4765` (initial blocked evidence), `affc223` (corrective integrity invariants and WAL preservation), `3aaf5c2` (final review hardening), `5e730d3` (test-only lint correction), `f6648fd` (SQLite no-follow remediation), `7c953d7`/`454ad49` (no-follow gate evidence) |
 
 The initial implementation candidate used for the first final green gate was
 `c81ccabe5af4901027dc5ab68ea87cf00dfa650c`. The latest remediation candidate
@@ -228,8 +229,8 @@ clean worktree:
 rtk run 'env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final'
 ```
 
-This post-evidence PASS is evidence only; it does not replace either required
-fresh review or change the terminal blocked decision below.
+At the time, this post-evidence PASS was evidence only; the later fresh review
+closure recorded below supersedes that historical blocked decision.
 
 ## Final whole-branch review remediation
 
@@ -314,8 +315,8 @@ rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final
 It passed focused repeats, normal and race suites, vet, module verification,
 format/lint/generation, boundary and vulnerability checks, gitleaks directory
 and 61-commit-history scans, whitespace diff check, and clean-status check.
-This final evidence record does not replace the pending fresh reviews or alter
-the blocked decision.
+At the time, this final evidence record did not replace pending fresh reviews;
+the later fresh review closure recorded below supersedes that historical status.
 
 ## Appendix — SQLite NOFOLLOW remediation
 
@@ -376,20 +377,60 @@ rtk env GOSUMDB=sum.golang.org GOTOOLCHAIN=go1.25.12 make batch-2a-final
 It again completed focused repetitions, normal and race suites, scoped fork
 vet, module verification, format/lint/generation, manifest verification,
 boundary checks, vulnerability scan, gitleaks, whitespace diff check, and
-clean-status check. This post-evidence PASS is evidence only; it does not
-replace either required fresh review or change the terminal blocked decision.
+clean-status check. At that time this post-evidence PASS was evidence only;
+the fresh review closure recorded below now supplies the authorization decision.
+
+## Fresh re-review closure and authorization
+
+| review | final verdict | closure record |
+| --- | --- | --- |
+| Task 6 re-review | **APPROVE** | Re-reviewed the integrity, crash-recovery, WAL-preservation, relation, and sanitized-CLI work after the corrective implementation and evidence gates. |
+| Whole-branch re-review | **CLEAN** | Re-reviewed the documented finding/fix rounds: Task 6 relation/WAL corrections (`affc223`), bounded runtime/filesystem/clock hardening (`3aaf5c2`), and the test-only pinned-lint correction (`5e730d3`). |
+| SQLite no-follow re-review | **SHIP** | Re-reviewed `f6648fd`: cached-descriptor symlink protection, canonical-parent lock/connector consistency, bounded fork provenance/manifest, and distinct driver registration. |
+
+The closed whole-branch finding/fix rounds were:
+
+1. Task 6 relation and hot-WAL findings: `affc223` established contiguous
+   durable relations and preserved the original hot WAL through offline
+   integrity checking.
+2. Whole-branch runtime boundary findings: `3aaf5c2` added bounded
+   event/head validation, fail-closed filesystem classification, owner-only
+   final-component handling, and panic-safe migration clocks.
+3. Pinned lint follow-up: `5e730d3` made only test-signature corrections after
+   the aggregate attempt exposed `revive` findings.
+4. SQLite pathname/reusable-descriptor finding: `f6648fd` added the bounded
+   no-follow fork, canonical-parent boundary, cached-descriptor regressions,
+   and unique driver registration for upstream coexistence.
+
+The no-follow fork and evidence chain are:
+
+- `f6648fd` — bounded driver fork, canonical-parent boundary, final-symlink
+  regressions, cached-`pUnused` connector regressions, private driver name,
+  and provenance/manifest gate wiring.
+- `7c953d7` — committed-input no-follow gate evidence.
+- `454ad49` — clean post-evidence aggregate record.
+- This final cleanup archives the ignored SDD review workspace outside the
+  scanned worktree and removes only
+  `.superpowers/sdd/2026-08-10-batch-2a-policy-engine-durable-storage/review-9eb98c8..2edc312.diff:generic-api-key:107`.
+  It retains exactly the three intentional privacy-test fingerprints:
+  `p2_privacy_external_test.go:generic-api-key:85`,
+  `task5_privacy_event_test.go:generic-api-key:55`, and
+  `task5_privacy_event_test.go:generic-api-key:56`.
+
+No production code is changed by this review-closure cleanup. The fresh
+reviews and clean whole-branch re-review authorize the next batch to be
+considered; they do not create a Batch 2B branch, tag, artifact, or execution.
 
 ## Review state and non-goals
 
 | scope | fresh review verdict |
 | --- | --- |
 | Tasks 1–5 | clean according to their recorded implementation-ledger reviews |
-| Task 6 | pending — corrective `affc223`, remediation `3aaf5c2`/`5e730d3`, and no-follow remediation `f6648fd` have not yet received a fresh review |
-| Full Task 1–6 branch/evidence | pending — not yet performed after the no-follow evidence update |
+| Task 6 | **APPROVE** — fresh Task 6 re-review closed the corrective and no-follow follow-ups |
+| Full Task 1–6 branch/evidence | **CLEAN** — fresh whole-branch re-review completed after the no-follow evidence update |
 
-The two pending reviews above are the sole blockers. This work creates no tag,
-does not publish an artifact, and is not a v1.0 release decision. Batch 2B may
-only be considered after the pending reviews complete and a separately captured
-evidence update authorizes it.
+This work creates no tag, does not publish an artifact, and is not a v1.0
+release decision. The authorization below permits Batch 2B consideration only;
+it does not state or imply that Batch 2B has started.
 
-BLOCKED — Batch 2B is not authorized.
+PASS — Batch 2B is authorized.
