@@ -39,6 +39,12 @@ func mapError(ctx context.Context, err error) error {
 	if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EPERM) {
 		return sqliteError(policyengine.ErrorPermissionDenied)
 	}
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		return sqliteError(policyengine.ErrorResourceExhausted)
+	}
+	if errors.Is(err, syscall.EROFS) {
+		return sqliteError(policyengine.ErrorPermissionDenied)
+	}
 
 	var sqliteErr *moderncsqlite.Error
 	if errors.As(err, &sqliteErr) {

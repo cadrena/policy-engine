@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"sync"
 	"time"
 
@@ -20,12 +21,16 @@ type writeRequest struct {
 	once   *sync.Once
 }
 
+// writerQueueCapacity keeps admission bounded while preserving FIFO order for
+// requests accepted behind the active transaction.
+const writerQueueCapacity = 2
+
 func (d *database) startWriter(ctx context.Context) error {
 	conn, err := d.openWriterConnection(ctx)
 	if err != nil {
 		return err
 	}
-	d.writeRequests = make(chan writeRequest)
+	d.writeRequests = make(chan writeRequest, writerQueueCapacity)
 	d.writerDone = make(chan struct{})
 	go d.writerLoop(conn)
 	return nil
@@ -37,7 +42,7 @@ func (d *database) openWriterConnection(ctx context.Context) (*sql.Conn, error) 
 		return nil, mapError(ctx, err)
 	}
 	if err := verifyConnectionPragmas(ctx, conn, d.config, false); err != nil {
-		_ = conn.Close()
+		discardWriterConnection(conn)
 		return nil, err
 	}
 	return conn, nil
@@ -105,7 +110,7 @@ func (d *database) writerLoop(conn *sql.Conn) {
 			}
 			result, discardConnection := d.executeWrite(conn, request)
 			if discardConnection {
-				_ = conn.Close()
+				discardWriterConnection(conn)
 				conn = nil
 			}
 			completeWrite(request, result)
@@ -156,6 +161,18 @@ func (d *database) executeWrite(conn *sql.Conn, request writeRequest) (error, bo
 		return mapError(request.ctx, err), true
 	}
 	return nil, false
+}
+
+func discardWriterConnection(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	// Returning driver.ErrBadConn from Raw tells database/sql to close the
+	// physical driver connection instead of returning it to the pool.
+	_ = conn.Raw(func(any) error {
+		return driver.ErrBadConn
+	})
+	_ = conn.Close()
 }
 
 func rollbackWriter(conn *sql.Conn) error {

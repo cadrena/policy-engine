@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"net/url"
 	"os"
 	"strconv"
@@ -31,7 +32,16 @@ type database struct {
 	writerDone    chan struct{}
 }
 
-func openDatabase(ctx context.Context, config Config) (_ *database, err error) {
+type connectorFactory func(string) (driver.Connector, error)
+
+func openDatabase(ctx context.Context, config Config) (*database, error) {
+	return openDatabaseWithConnectorFactory(ctx, config, moderncsqlite.NewConnector)
+}
+
+func openDatabaseWithConnectorFactory(ctx context.Context, config Config, newConnector connectorFactory) (_ *database, err error) {
+	if newConnector == nil {
+		return nil, sqliteError(policyengine.ErrorInvalidArgument)
+	}
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
@@ -63,7 +73,7 @@ func openDatabase(ctx context.Context, config Config) (_ *database, err error) {
 		return nil, mapError(ctx, err)
 	}
 
-	writerConnector, err := moderncsqlite.NewConnector(databaseDSN(config, false))
+	writerConnector, err := newConnector(databaseDSN(config, false))
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
@@ -79,7 +89,7 @@ func openDatabase(ctx context.Context, config Config) (_ *database, err error) {
 		return nil, err
 	}
 
-	readerConnector, err := moderncsqlite.NewConnector(databaseDSN(config, true))
+	readerConnector, err := newConnector(databaseDSN(config, true))
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
