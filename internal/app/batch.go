@@ -13,14 +13,16 @@ import (
 )
 
 type evaluationSession struct {
-	revisionID     string
-	slotGeneration uint64
-	dataGeneration uint64
-	evaluatedAt    time.Time
-	program        *dsl.Program
-	artifact       *dsl.Artifact
-	reader         *evaluator.SnapshotReader
-	close          func() error
+	revisionID      string
+	slotGeneration  uint64
+	dataGeneration  uint64
+	evaluatedAt     time.Time
+	program         *dsl.Program
+	artifact        *dsl.Artifact
+	reader          *evaluator.SnapshotReader
+	schema          domain.DataSchema
+	attributeBudget *batchWorkBudget
+	close           func() error
 
 	binding                     policyengine.EvidenceBinding
 	effectiveContextFingerprint [sha256.Size]byte
@@ -220,6 +222,7 @@ func (s *AuthorizationService) openEvaluationSession(
 		revisionID: pin.revisionID, slotGeneration: pin.slotGeneration,
 		dataGeneration: snapshot.Generation(), evaluatedAt: evaluatedAt,
 		program: hydrated.Program(), artifact: hydrated.Artifact(), reader: reader, close: snapshot.Close,
+		schema: schema, attributeBudget: &batchWorkBudget{maxItems: policyengine.MaxAggregateWorkItems, maxBytes: policyengine.MaxAggregateInputBytes},
 		binding:                     binding,
 		effectiveContextFingerprint: fingerprintEffectiveContext(contextual),
 		usedContextualData:          usedContextualData, usedDelegation: usedDelegation,

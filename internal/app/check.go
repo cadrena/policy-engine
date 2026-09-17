@@ -202,8 +202,12 @@ func (s *AuthorizationService) evaluateSessionItemWithTrace(
 	if err != nil {
 		return policyengine.DecisionResult{}, nil, err
 	}
+	attributes, err := resolveResourceAttributes(ctx, session, resource, action)
+	if err != nil {
+		return policyengine.DecisionResult{}, nil, err
+	}
 	dslResult, err := session.program.Check(ctx, dsl.Request{
-		Subject: subject, Resource: resource, Action: action, Arguments: arguments,
+		Subject: subject, Resource: resource, Action: action, Arguments: arguments, ResourceAttributes: attributes,
 	}, session.tupleReader)
 	if err != nil {
 		return policyengine.DecisionResult{}, nil, sanitizeEvaluationError(err)

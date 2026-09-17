@@ -8,8 +8,11 @@ import (
 // DataSchema is the bounded authorization-data shape derived from one decoded
 // canonical artifact.
 type DataSchema struct {
-	entities map[string]dataEntity
+	entities      map[string]dataEntity
+	resourcePaths map[actionKey][][]string
 }
+
+type actionKey struct{ entity, action string }
 
 type dataEntity struct {
 	relations      map[string][]dsl.RelationTarget
@@ -26,7 +29,7 @@ func NewDataSchema(artifact *dsl.Artifact) (DataSchema, error) {
 	if err != nil {
 		return DataSchema{}, domainError(policyengine.ErrorIntegrity)
 	}
-	result := DataSchema{entities: make(map[string]dataEntity, len(schema.Entities))}
+	result := DataSchema{entities: make(map[string]dataEntity, len(schema.Entities)), resourcePaths: make(map[actionKey][][]string, len(schema.Guards))}
 	for _, entity := range schema.Entities {
 		indexed := dataEntity{
 			relations:      make(map[string][]dsl.RelationTarget, len(entity.Relations)),
@@ -42,9 +45,12 @@ func NewDataSchema(artifact *dsl.Artifact) (DataSchema, error) {
 		if !ok {
 			return DataSchema{}, domainError(policyengine.ErrorIntegrity)
 		}
+		paths := newAttributePathTrie()
 		for _, rule := range guard.Rules {
 			collectResourcePaths(entity.attributePaths, rule.Condition)
+			collectResourcePaths(paths, rule.Condition)
 		}
+		result.resourcePaths[actionKey{guard.Entity, guard.Action}] = paths.paths(nil)
 		result.entities[guard.Entity] = entity
 	}
 	return result, nil
@@ -79,4 +85,14 @@ func domainError(category policyengine.ErrorCategory) error {
 		return err
 	}
 	return constructorErr
+}
+
+// ResourcePaths returns a defensive copy of the selected action's guard paths.
+func (s DataSchema) ResourcePaths(entity, action string) [][]string {
+	stored := s.resourcePaths[actionKey{entity, action}]
+	result := make([][]string, len(stored))
+	for i, path := range stored {
+		result[i] = append([]string(nil), path...)
+	}
+	return result
 }

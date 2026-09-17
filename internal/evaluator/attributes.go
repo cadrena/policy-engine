@@ -72,6 +72,9 @@ func (r *SnapshotReader) ResolveAttribute(
 	if err != nil {
 		return nil, false, err
 	}
+	if !persistent.Valid() || persistent.Key().Entity() != key.Entity() || !samePath(persistent.Key().Path(), key.Path()) {
+		return nil, false, integrityError()
+	}
 	persistentValue, persistentFound := persistent.Value()
 	if persistentFound && contextualPathConflict {
 		return nil, false, invalidArgument()
@@ -123,6 +126,9 @@ func (r *SnapshotReader) rejectPersistentPathConflict(
 		result, err := r.snapshot.GetAttribute(ctx, ancestor)
 		if err != nil {
 			return err
+		}
+		if !result.Valid() || result.Key().Entity() != ancestor.Entity() || !samePath(result.Key().Path(), ancestor.Path()) {
+			return integrityError()
 		}
 		if result.Found() {
 			return invalidArgument()
@@ -192,5 +198,10 @@ func invalidArgument() error {
 
 func resourceExhausted() error {
 	err, _ := policyengine.NewEngineError(policyengine.ErrorResourceExhausted)
+	return err
+}
+
+func integrityError() error {
+	err, _ := policyengine.NewEngineError(policyengine.ErrorIntegrity)
 	return err
 }

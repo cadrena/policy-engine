@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"sort"
 
 	"github.com/cadrena/dsl"
 	policyengine "github.com/cadrena/policy-engine"
@@ -191,4 +192,20 @@ func collectResourcePaths(paths *attributePathTrie, condition dsl.ConditionExpre
 			collectResourcePaths(paths, *value)
 		}
 	}
+}
+
+func (t *attributePathTrie) paths(prefix []string) [][]string {
+	var result [][]string
+	if t.terminal {
+		result = append(result, append([]string(nil), prefix...))
+	}
+	names := make([]string, 0, len(t.children))
+	for name := range t.children {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		result = append(result, t.children[name].paths(append(prefix, name))...)
+	}
+	return result
 }
