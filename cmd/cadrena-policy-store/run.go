@@ -97,6 +97,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		_, _ = fmt.Fprintln(stdout, "EXPORTED")
 		return 0
+	case "prune-events":
+		if err := sqlite.PruneExpiredEvents(ctx, config); err != nil {
+			return writeCLIResultError(stderr, err)
+		}
+		_, _ = fmt.Fprintln(stdout, "PRUNED")
+		return 0
 	default:
 		return writeCLIError(stderr, policyengine.ErrorInvalidArgument)
 	}

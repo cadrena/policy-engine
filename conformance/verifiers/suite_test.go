@@ -47,8 +47,8 @@ func (v *approvalVerifier) VerifyApproval(
 	request policyengine.ApprovalVerificationRequest,
 ) (policyengine.ApprovalVerificationResult, error) {
 	if string(request.Evidence()) == "conformance-cancellation" {
-		v.once.Do(func() { close(v.entered) })
 		v.calls.Add(1)
+		v.once.Do(func() { close(v.entered) })
 		<-ctx.Done()
 		return policyengine.ApprovalVerificationResult{}, ctx.Err()
 	}
@@ -73,8 +73,8 @@ func (v *delegationVerifier) VerifyDelegation(
 	request policyengine.DelegationVerificationRequest,
 ) (policyengine.DelegationVerificationResult, error) {
 	if string(request.Evidence()) == "conformance-cancellation" {
-		v.once.Do(func() { close(v.entered) })
 		v.calls.Add(1)
+		v.once.Do(func() { close(v.entered) })
 		<-ctx.Done()
 		return policyengine.DelegationVerificationResult{}, ctx.Err()
 	}

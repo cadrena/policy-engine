@@ -129,6 +129,24 @@ records or manage backup storage. If an interrupted export leaves an
 `.audit-backup-*` directory beside the output, inspect and remove it before
 you retry. The command refuses to run while that directory remains.
 
+## Offline event pruning
+
+Stop the SQLite store before you prune events from the live source:
+
+```sh
+go run ./cmd/cadrena-policy-store --db /absolute/source.db prune-events
+```
+
+The command checks the complete store, then applies the normal 24-hour event
+retention rule to every namespace. It updates each event expiry watermark in
+the same transaction. It also checks the complete store before it commits.
+The command changes the source database. The backup export above does not.
+
+Logical deletion does not erase bytes from database free pages, WAL files,
+snapshots, or old backups. Complete the host's WAL checkpoint and storage
+procedure. Verify the database, sidecars, and other host copies before you
+make a claim about physical erasure.
+
 ## Explicit V1 non-goals
 
 - No `filter`, `FilterCandidates`, global reverse lookup, candidate discovery,

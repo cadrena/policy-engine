@@ -176,6 +176,46 @@ func TestRunBackupExportsFreshRestorableImage(t *testing.T) {
 	}
 }
 
+func TestRunPruneEventsUsesOfflineMaintenance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.db")
+	if code := run(context.Background(), []string{"--db", path, "migrate"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("migrate exit = %d", code)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"--db", path, "prune-events"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("prune-events exit = %d, stderr = %q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "PRUNED\n" {
+		t.Errorf("prune-events stdout = %q, want PRUNED", got)
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("prune-events stderr = %q, want empty", got)
+	}
+	if code := run(context.Background(), []string{"--db", path, "integrity"}, io.Discard, io.Discard); code != 0 {
+		t.Errorf("integrity after prune-events exit = %d, want 0", code)
+	}
+	config := sqlite.Config{
+		Path: path, BusyTimeout: cliBusyTimeout, MaxReaders: 1, Synchronous: sqlite.SynchronousFull,
+		ActivationHistoryRetention: cliActivationHistoryRetention, Clock: wallClock{},
+	}
+	opened, err := sqlite.Open(config)
+	if err != nil {
+		t.Fatalf("Open(source) error = %v", err)
+	}
+	defer func() { _ = opened.Close() }()
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"--db", path, "prune-events"}, &stdout, &stderr); code != 1 {
+		t.Errorf("prune-events with running source exit = %d, want 1", code)
+	}
+	if got := stdout.String(); got != "" {
+		t.Errorf("prune-events with running source stdout = %q, want empty", got)
+	}
+	if got := stderr.String(); got != "UNAVAILABLE\n" {
+		t.Errorf("prune-events with running source stderr = %q, want UNAVAILABLE", got)
+	}
+}
+
 func TestRunIntegrityUsesSanitizedExitCategoriesAndExclusiveMaintenance(t *testing.T) {
 	// This catches category drift, leaked durable data/paths, or an integrity
 	// command that can run alongside a runtime or another SQLite maintainer.
