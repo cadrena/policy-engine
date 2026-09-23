@@ -112,6 +112,23 @@ See the [V1 specification](./SPEC.md), [security policy](./SECURITY.md), and
 [public and commercial boundary](./docs/public-private-boundary.md) for the
 normative contract.
 
+## Offline audit backup export
+
+Stop the SQLite store before you export its image. Use a new output path:
+
+```sh
+go run ./cmd/cadrena-policy-store --db /absolute/source.db --out /absolute/backup.db backup
+```
+
+The command copies the store into a fresh SQLite image. It removes
+`state_events` older than 22 days and preserves each namespace's event expiry
+watermark. It rejects a source with events older than 30 days. It also rejects
+an existing output path or output sidecar. Restore the image as a new store and
+run `integrity` before use. This command does not set retention rules for other
+records or manage backup storage. If an interrupted export leaves an
+`.audit-backup-*` directory beside the output, inspect and remove it before
+you retry. The command refuses to run while that directory remains.
+
 ## Explicit V1 non-goals
 
 - No `filter`, `FilterCandidates`, global reverse lookup, candidate discovery,

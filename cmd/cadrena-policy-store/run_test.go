@@ -147,6 +147,35 @@ func TestRunIntegrityAcceptsOnlyClosedMigratedStore(t *testing.T) {
 	}
 }
 
+func TestRunBackupExportsFreshRestorableImage(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source.db")
+	if code := run(context.Background(), []string{"--db", source, "migrate"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("migrate exit = %d", code)
+	}
+	destination := filepath.Join(t.TempDir(), "backup.db")
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"--db", source, "--out", destination, "backup"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("backup exit = %d, stderr = %q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "EXPORTED\n" {
+		t.Errorf("backup stdout = %q, want EXPORTED", got)
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("backup stderr = %q, want empty", got)
+	}
+	if code := run(context.Background(), []string{"--db", destination, "integrity"}, io.Discard, io.Discard); code != 0 {
+		t.Errorf("restored backup integrity exit = %d, want 0", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"--db", source, "--out", destination, "backup"}, &stdout, &stderr); code != 1 {
+		t.Errorf("backup overwrite exit = %d, want 1", code)
+	}
+	if got := stderr.String(); got != "FAILED_PRECONDITION\n" {
+		t.Errorf("backup overwrite stderr = %q, want FAILED_PRECONDITION", got)
+	}
+}
+
 func TestRunIntegrityUsesSanitizedExitCategoriesAndExclusiveMaintenance(t *testing.T) {
 	// This catches category drift, leaked durable data/paths, or an integrity
 	// command that can run alongside a runtime or another SQLite maintainer.

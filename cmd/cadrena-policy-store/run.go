@@ -37,8 +37,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("cadrena-policy-store", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	databasePath := flags.String("db", "", "")
+	backupPath := flags.String("out", "", "")
 	flagArgs, command, ok := cliArguments(args)
-	if !ok || flags.Parse(flagArgs) != nil || flags.NArg() != 0 || *databasePath == "" || !filepath.IsAbs(*databasePath) {
+	if !ok || flags.Parse(flagArgs) != nil || flags.NArg() != 0 || *databasePath == "" || !filepath.IsAbs(*databasePath) ||
+		(command == "backup" && !filepath.IsAbs(*backupPath)) || (command != "backup" && *backupPath != "") {
 		return writeCLIError(stderr, policyengine.ErrorInvalidArgument)
 	}
 
@@ -89,6 +91,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		_, _ = fmt.Fprintln(stdout, "VALID")
 		return 0
+	case "backup":
+		if err := sqlite.ExportAuditBackup(ctx, config, *backupPath); err != nil {
+			return writeCLIResultError(stderr, err)
+		}
+		_, _ = fmt.Fprintln(stdout, "EXPORTED")
+		return 0
 	default:
 		return writeCLIError(stderr, policyengine.ErrorInvalidArgument)
 	}
@@ -100,6 +108,10 @@ func cliArguments(args []string) ([]string, string, bool) {
 		return args[:2], args[2], true
 	case len(args) == 2 && strings.HasPrefix(args[0], "--db="):
 		return args[:1], args[1], true
+	case len(args) == 5 && args[0] == "--db" && args[2] == "--out":
+		return args[:4], args[4], true
+	case len(args) == 3 && strings.HasPrefix(args[0], "--db=") && strings.HasPrefix(args[1], "--out="):
+		return args[:2], args[2], true
 	default:
 		return nil, "", false
 	}
