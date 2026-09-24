@@ -16,6 +16,7 @@ import (
 
 const (
 	cliBusyTimeout                = 250 * time.Millisecond
+	cliOperationTimeout           = 30 * time.Second
 	cliActivationHistoryRetention = 2
 )
 
@@ -44,7 +45,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return writeCLIError(stderr, policyengine.ErrorInvalidArgument)
 	}
 
-	operationContext, cancel := context.WithTimeout(ctx, cliBusyTimeout)
+	// Migration work can exceed the SQLite lock wait on a busy host.
+	operationContext, cancel := context.WithTimeout(ctx, cliOperationTimeout)
 	defer cancel()
 	config := sqlite.Config{
 		Path:                       *databasePath,
